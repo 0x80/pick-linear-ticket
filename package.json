@@ -1,0 +1,50 @@
+{
+  "name": "pick-linear-ticket",
+  "version": "0.1.0",
+  "description": "CLI that picks the next eligible Linear ticket from a team's backlog and prints the ticket id + a ready-to-use git branch name. Wraps `linear-cli` with caching/workspace recovery and a four-dimension ranking (promoted (in-cycle OR Todo) > unblocks > priority > createdAt).",
+  "keywords": [
+    "backlog",
+    "branch-name",
+    "cli",
+    "linear",
+    "ticket"
+  ],
+  "license": "MIT",
+  "author": "Thijs Koerselman <thijskoerselman@gmail.com>",
+  "homepage": "https://github.com/0x80/pick-linear-ticket",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0x80/pick-linear-ticket.git"
+  },
+  "bugs": {
+    "url": "https://github.com/0x80/pick-linear-ticket/issues"
+  },
+  "bin": {
+    "pick-linear-ticket": "./src/cli.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "scripts": {
+    "pick": "node ./src/cli.ts",
+    "test": "vitest run",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "consola": "^3.4.2",
+    "execa": "^9.6.0",
+    "meow": "^13.2.0"
+  },
+  "devDependencies": {
+    "@codecompose/typescript-config": "^3.2.0",
+    "@types/node": "^25.6.2",
+    "typescript": "6.0.3",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
