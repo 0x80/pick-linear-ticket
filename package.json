@@ -1,7 +1,7 @@
 {
   "name": "pick-linear-ticket",
   "version": "0.1.0",
-  "description": "CLI that picks the next eligible Linear ticket from a team's backlog and prints the ticket id + a ready-to-use git branch name. Wraps `linear-cli` with caching/workspace recovery and a four-dimension ranking (promoted (in-cycle OR Todo) > unblocks > priority > createdAt).",
+  "description": "CLI that picks the next eligible Linear ticket from a team's backlog.",
   "keywords": [
     "backlog",
     "branch-name",
@@ -10,7 +10,7 @@
     "ticket"
   ],
   "license": "MIT",
-  "author": "Thijs Koerselman <thijskoerselman@gmail.com>",
+  "author": "Thijs Koerselman",
   "homepage": "https://github.com/0x80/pick-linear-ticket",
   "repository": {
     "type": "git",
@@ -19,9 +19,7 @@
   "bugs": {
     "url": "https://github.com/0x80/pick-linear-ticket/issues"
   },
-  "bin": {
-    "pick-linear-ticket": "./dist/cli.mjs"
-  },
+  "bin": "./dist/cli.mjs",
   "files": [
     "dist",
     "src",
@@ -44,6 +42,7 @@
   "devDependencies": {
     "@codecompose/typescript-config": "^3.2.0",
     "@types/node": "^25.6.2",
+    "@typescript/native-preview": "7.0.0-dev.20260519.1",
     "tsdown": "^0.16.0",
     "typescript": "6.0.3",
     "vitest": "^4.1.5"

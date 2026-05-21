@@ -31,6 +31,17 @@ export class WorkspaceMismatchError extends Error {
   }
 }
 
+/** Thrown when the `linear-cli` binary is not on `$PATH`. */
+export class LinearCliMissingError extends Error {
+  constructor() {
+    super('linear-cli binary not found on $PATH')
+    this.name = 'LinearCliMissingError'
+  }
+}
+
+/** Install instructions URL for `linear-cli`, shown when the binary is missing. */
+export const LINEAR_CLI_INSTALL_URL = 'https://github.com/Finesssee/linear-cli'
+
 async function runLinear(args: string[]): Promise<string> {
   try {
     const { stdout } = await execa('linear-cli', args)
@@ -38,6 +49,93 @@ async function runLinear(args: string[]): Promise<string> {
   } catch (error) {
     const stderr = error instanceof ExecaError ? error.stderr : ''
     throw new Error(`linear-cli ${args.join(' ')} failed:\n${stderr}`, { cause: error })
+  }
+}
+
+/**
+ * Detects whether `linear-cli` is installed by attempting `--version`. Any
+ * `ENOENT` from spawn indicates the binary is missing from `$PATH`; other
+ * failures (e.g. the binary exists but errored) count as "installed" so the
+ * actual error surfaces from the real call path rather than here.
+ */
+async function isLinearCliInstalled(): Promise<boolean> {
+  try {
+    await execa('linear-cli', ['--version'])
+    return true
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      'code' in error &&
+      (error as { code?: unknown }).code === 'ENOENT'
+    ) {
+      return false
+    }
+    return true
+  }
+}
+
+/**
+ * Asks `linear-cli` whether it currently holds credentials. Returns `true`
+ * when `auth status` reports `configured: true`; treats any failure as "not
+ * authenticated" so the OAuth flow runs and gives the user a clean path
+ * forward instead of dumping a CLI error.
+ */
+async function isLinearCliAuthenticated(): Promise<boolean> {
+  try {
+    const { stdout } = await execa('linear-cli', ['auth', 'status', '-o', 'json'])
+    const data = JSON.parse(stdout) as { configured?: boolean }
+    return data.configured === true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Runs `linear-cli auth oauth` with inherited stdio so the user sees the CLI's
+ * prompts, the browser opens for the OAuth handshake, and any TTY-driven
+ * workspace picker stays interactive. Throws if the user cancels or the flow
+ * fails — the caller should treat that as a fatal preflight error.
+ */
+async function runOauthFlow(): Promise<void> {
+  await execa('linear-cli', ['auth', 'oauth'], { stdio: 'inherit' })
+}
+
+/**
+ * Preflight verification before any command that talks to Linear:
+ *
+ * 1. `linear-cli` is installed — otherwise throws `LinearCliMissingError`
+ *    and the CLI shell points the user at the install instructions.
+ * 2. `linear-cli` is authenticated — if not, kicks off `auth oauth`
+ *    interactively so the browser-based handshake can complete.
+ * 3. The authenticated workspace contains the requested team — if not,
+ *    re-runs `auth oauth` so the user can re-select the right workspace,
+ *    then retries the team lookup once.
+ *
+ * Returns the resolved `LinearConfig` so callers don't need to invoke
+ * `ensureWorkspace` again.
+ */
+export async function preflight(args: {
+  teamKey: string
+  workspace: string
+}): Promise<LinearConfig> {
+  if (!(await isLinearCliInstalled())) {
+    throw new LinearCliMissingError()
+  }
+
+  if (!(await isLinearCliAuthenticated())) {
+    process.stderr.write('linear-cli is not authenticated. Launching OAuth flow…\n')
+    await runOauthFlow()
+  }
+
+  try {
+    return await ensureWorkspace(args)
+  } catch (error) {
+    if (!(error instanceof WorkspaceMismatchError)) throw error
+    process.stderr.write(
+      `${error.message}\nLaunching OAuth flow to authenticate for the right workspace…\n`,
+    )
+    await runOauthFlow()
+    return await ensureWorkspace(args)
   }
 }
 

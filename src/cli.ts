@@ -2,13 +2,16 @@
 import { consola } from 'consola'
 import meow from 'meow'
 import {
+  LINEAR_CLI_INSTALL_URL,
+  type LinearConfig,
+  LinearCliMissingError,
   WorkspaceMismatchError,
   activeCycleIdentifiers,
   activeSetRelations,
   createdAtFor,
-  ensureWorkspace,
   getIssue,
   listAllIssues,
+  preflight,
   startIssue,
   whoami,
 } from './linear-cli.ts'
@@ -40,8 +43,8 @@ const cli = meow(
     0  Picked successfully.
     2  No eligible candidate.
     3  Explicit pick failed gates (wrong team, terminal state, active blocker).
-    4  Workspace mismatch — sign into the right workspace via \`linear-cli auth oauth\`.
-    5  Linear CLI error or unknown error.
+    4  Workspace mismatch after OAuth retry — re-run \`linear-cli auth oauth\`.
+    5  linear-cli missing, Linear CLI error, or unknown error.
 `,
   {
     importMeta: import.meta,
@@ -124,15 +127,14 @@ function writeVerboseTable(candidates: Candidate[]): void {
   }
 }
 
-async function runAutoSelect(args: {
-  teamKey: string
-  workspace: string
-  start: boolean
-  json: boolean
-  verbose: boolean
-}): Promise<void> {
-  const config = await ensureWorkspace({ teamKey: args.teamKey, workspace: args.workspace })
-
+async function runAutoSelect(
+  config: LinearConfig,
+  args: {
+    start: boolean
+    json: boolean
+    verbose: boolean
+  },
+): Promise<void> {
   const currentUserName = await whoami()
 
   const [cycleIds, relations, allIssues] = await Promise.all([
@@ -226,10 +228,9 @@ async function runAutoSelect(args: {
 
 async function runExplicitPick(
   rawId: string,
-  args: { teamKey: string; workspace: string; start: boolean; json: boolean },
+  config: LinearConfig,
+  args: { start: boolean; json: boolean },
 ): Promise<void> {
-  const config = await ensureWorkspace({ teamKey: args.teamKey, workspace: args.workspace })
-
   const id = rawId.toUpperCase()
   if (!isIdentifier(id)) {
     log.error(`Invalid ticket id: ${rawId}`)
@@ -283,24 +284,29 @@ async function runExplicitPick(
 }
 
 async function main(): Promise<void> {
+  const config = await preflight({ teamKey, workspace })
+
   const ticketId = cli.input[0]
   const common = {
-    teamKey,
-    workspace,
     start: cli.flags.start,
     json: cli.flags.json,
   }
 
   if (ticketId !== undefined) {
-    await runExplicitPick(ticketId, common)
+    await runExplicitPick(ticketId, config, common)
   } else {
-    await runAutoSelect({ ...common, verbose: cli.flags.verbose })
+    await runAutoSelect(config, { ...common, verbose: cli.flags.verbose })
   }
 }
 
 try {
   await main()
 } catch (error) {
+  if (error instanceof LinearCliMissingError) {
+    log.error('linear-cli is not installed on this machine.')
+    log.info(`Install instructions: ${LINEAR_CLI_INSTALL_URL}`)
+    process.exit(5)
+  }
   if (error instanceof WorkspaceMismatchError) {
     log.error(error.message)
     log.warn("Hint: run 'linear-cli auth oauth' and pick the right workspace.")
