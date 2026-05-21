@@ -19,7 +19,7 @@ Issues with at least one active blocker (Backlog/Todo/In Progress) are dropped b
 
 ## Install
 
-Requires Node ≥ 24 (uses Node's native TypeScript type-stripping; no build step) and the `linear-cli` binary on `PATH`, authenticated to a Linear workspace.
+Requires Node ≥ 24. The [`linear-cli`](https://github.com/Finesssee/linear-cli) binary must be on `$PATH` — the CLI surfaces install instructions and auto-triggers `linear-cli auth oauth` on first run if anything's missing (see [Preflight](#preflight)).
 
 Run without installing:
 
@@ -27,11 +27,22 @@ Run without installing:
 pnpm dlx pick-linear-ticket --team RAN --workspace emberengineering
 ```
 
-Or install from GitHub as a dev dependency (npm publish pending):
+Install from GitHub as a dev dependency (npm publish pending):
 
 ```sh
 pnpm add -D github:0x80/pick-linear-ticket
 ```
+
+Or install globally from a local clone while iterating:
+
+```sh
+git clone https://github.com/0x80/pick-linear-ticket
+cd pick-linear-ticket
+pnpm install
+pnpm add -g "$(pwd)"
+```
+
+The `prepare` script runs `tsdown` and writes the bundled entry to `dist/cli.mjs`, which is what `bin` points at.
 
 ## Usage
 
@@ -77,21 +88,29 @@ pick-linear-ticket RAN-22 --team RAN --workspace emberengineering --start
 }
 ```
 
+## Preflight
+
+Before any Linear call, the CLI runs three checks in order:
+
+1. **`linear-cli` is installed.** If the binary is missing from `$PATH`, the CLI prints the install URL and exits with code `5`.
+2. **`linear-cli` is authenticated.** Determined via `linear-cli auth status -o json`. If not, `linear-cli auth oauth` runs interactively — your browser opens for the handshake.
+3. **The authenticated workspace contains the requested team.** Determined by checking `linear-cli teams list` for the team key, with one automatic cache-clear retry. If the team still isn't visible, `linear-cli auth oauth` runs again so you can pick the right workspace, and the team lookup is retried once more.
+
+Steps 2 and 3 mean a fresh-laptop run can complete the whole OAuth dance without leaving the CLI invocation. If you're scripting this and want hard failures instead of an interactive prompt, run `linear-cli auth status` and `linear-cli teams list` yourself first.
+
 ## Exit codes
 
-| Code | Meaning                                                                                                                       |
-| ---- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `0`  | Picked successfully; result on stdout.                                                                                        |
-| `2`  | No eligible candidate (active cycle + backlog both empty after filters).                                                      |
-| `3`  | Explicit pick failed gates (wrong team, terminal state, active blocker).                                                      |
-| `4`  | Workspace mismatch — `linear-cli` does not see the requested team. Sign into the right workspace via `linear-cli auth oauth`. |
-| `5`  | `linear-cli` error or unknown error.                                                                                          |
+| Code | Meaning                                                                                       |
+| ---- | --------------------------------------------------------------------------------------------- |
+| `0`  | Picked successfully; result on stdout.                                                        |
+| `2`  | No eligible candidate (active cycle + backlog both empty after filters).                      |
+| `3`  | Explicit pick failed gates (wrong team, terminal state, active blocker).                      |
+| `4`  | Workspace mismatch still present after the preflight OAuth retry — re-run `linear-cli auth oauth`. |
+| `5`  | `linear-cli` missing from `$PATH`, `linear-cli` error, or unknown error.                      |
 
 ## Filtering rules
 
 Only issues whose `state.name` is `Backlog` or `Todo` and whose assignee is the current user (per `linear-cli whoami`) or `null` are considered. Tickets in `In Progress`, `Done`, `Canceled`, `Triage`, `Some Day`, or any other state are skipped.
-
-Workspace recovery: if the requested team isn't visible to `linear-cli`, the CLI runs `linear-cli cache clear` and retries once. If it's still missing, it exits with code 4 and a hint to run `linear-cli auth oauth`.
 
 ## Limits
 
