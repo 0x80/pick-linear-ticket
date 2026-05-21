@@ -135,7 +135,7 @@ export async function preflight(args: {
       `${error.message}\nLaunching OAuth flow to authenticate for the right workspace…\n`,
     )
     await runOauthFlow()
-    return await ensureWorkspace(args)
+    return ensureWorkspace(args)
   }
 }
 

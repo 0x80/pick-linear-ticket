@@ -1,0 +1,10 @@
+pre-commit:
+  parallel: true
+  commands:
+    format:
+      glob: '*.{js,ts,mjs,cjs,json,jsonc,md,yaml,yml}'
+      run: pnpm exec oxfmt --no-error-on-unmatched-pattern {staged_files}
+      stage_fixed: true
+    lint:
+      glob: '*.{js,ts,mjs,cjs}'
+      run: pnpm exec oxlint -c .oxlintrc.json --import-plugin --type-aware --no-error-on-unmatched-pattern {staged_files}

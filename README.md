@@ -100,13 +100,13 @@ Steps 2 and 3 mean a fresh-laptop run can complete the whole OAuth dance without
 
 ## Exit codes
 
-| Code | Meaning                                                                                       |
-| ---- | --------------------------------------------------------------------------------------------- |
-| `0`  | Picked successfully; result on stdout.                                                        |
-| `2`  | No eligible candidate (active cycle + backlog both empty after filters).                      |
-| `3`  | Explicit pick failed gates (wrong team, terminal state, active blocker).                      |
+| Code | Meaning                                                                                            |
+| ---- | -------------------------------------------------------------------------------------------------- |
+| `0`  | Picked successfully; result on stdout.                                                             |
+| `2`  | No eligible candidate (active cycle + backlog both empty after filters).                           |
+| `3`  | Explicit pick failed gates (wrong team, terminal state, active blocker).                           |
 | `4`  | Workspace mismatch still present after the preflight OAuth retry — re-run `linear-cli auth oauth`. |
-| `5`  | `linear-cli` missing from `$PATH`, `linear-cli` error, or unknown error.                      |
+| `5`  | `linear-cli` missing from `$PATH`, `linear-cli` error, or unknown error.                           |
 
 ## Filtering rules
 

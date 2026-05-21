@@ -53,7 +53,7 @@ function makeCandidate(overrides: CandidateOverrides): Candidate {
 
 /** Converts an array of candidates into a CandidatePool map. */
 function makePool(candidates: Candidate[]): CandidatePool {
-  return new Map(candidates.map((c) => [c.identifier as Identifier, c]))
+  return new Map(candidates.map((c) => [c.identifier, c]))
 }
 
 describe('pickCandidate', () => {
