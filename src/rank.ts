@@ -133,7 +133,7 @@ export function pickCandidate(
   if (survivors.length === 0) {
     return {
       kind: 'no-candidates',
-      why: 'active cycle empty; backlog empty after blocking/assignment filters',
+      why: 'active cycle empty; no Todo candidates after blocking/assignment filters',
     }
   }
 

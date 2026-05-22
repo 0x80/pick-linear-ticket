@@ -160,9 +160,17 @@ async function runAutoSelect(
     }
   }
 
+  /**
+   * Eligibility: in the active cycle, OR explicitly marked `Todo`. Plain
+   * `Backlog` is intentionally excluded — Backlog is a parking lot for
+   * "we might do this someday," and the user signals "actually pick this
+   * up" by either pulling the ticket into the active cycle or moving it
+   * to `Todo`. Without the filter, the picker happily returns Backlog
+   * tickets that the user has been declining for weeks.
+   */
   const eligibleIssues = allIssues.filter(
     (i) =>
-      (i.stateName === 'Backlog' || i.stateName === 'Todo') &&
+      (cycleIds.has(i.identifier) || i.stateName === 'Todo') &&
       (i.assigneeName === null || i.assigneeName === currentUserName),
   )
 

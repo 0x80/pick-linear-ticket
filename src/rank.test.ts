@@ -61,7 +61,9 @@ describe('pickCandidate', () => {
     const result = pickCandidate(new Map(), new Set(), new Map())
     expect(result.kind).toBe('no-candidates')
     if (result.kind === 'no-candidates') {
-      expect(result.why).toBe('active cycle empty; backlog empty after blocking/assignment filters')
+      expect(result.why).toBe(
+        'active cycle empty; no Todo candidates after blocking/assignment filters',
+      )
     }
   })
 

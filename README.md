@@ -1,6 +1,6 @@
 # pick-linear-ticket
 
-A small CLI that picks the next eligible Linear ticket from a team's backlog and prints the ticket id + a ready-to-use git branch name. Wraps the [`linear-cli`](https://github.com/Finesssee/linear-cli) binary, so authentication and caching are already handled.
+A small CLI that picks the next eligible Linear ticket from a team's active cycle or `Todo` column and prints the ticket id + a ready-to-use git branch name. Wraps the [`linear-cli`](https://github.com/Finesssee/linear-cli) binary, so authentication and caching are already handled.
 
 ## Why
 
@@ -8,12 +8,13 @@ Picking "what should I work on next?" through the Linear web UI is fine; picking
 
 This CLI does that composition once. Output is either a single human-readable line or JSON, so it's easy to consume from either a terminal or a script.
 
+Eligibility: an issue is considered only if it is in the team's active cycle, or its `state.name` is `Todo`. Plain `Backlog` is intentionally excluded — Backlog is a parking lot for "we might do this someday," and the user signals "actually pick this up" by either pulling the ticket into the active cycle or moving it to `Todo`. (Backlog tickets that have been added to the active cycle remain eligible via the cycle.)
+
 The ranking is fixed:
 
-1. **Promoted** — issues that are in the team's active cycle _or_ have been moved from `Backlog` to `Todo` sort above plain backlog work. Both signals mean "the user wants this soon," so they are treated as a single tier rather than two separate dimensions.
-2. **Unblocks count** — inside the tier, issues that unblock other still-active issues sort higher. The rationale is to clear the team's dependency chain ahead of standalone work.
-3. **Priority** — Urgent → High → Medium → Low → No priority.
-4. **Created date** — older tickets win ties.
+1. **Unblocks count** — issues that unblock other still-active issues sort higher. The rationale is to clear the team's dependency chain ahead of standalone work.
+2. **Priority** — Urgent → High → Medium → Low → No priority.
+3. **Created date** — older tickets win ties.
 
 Issues with at least one active blocker (Backlog/Todo/In Progress) are dropped before ranking.
 
@@ -65,7 +66,7 @@ pick-linear-ticket [TICKET_ID] --team <key> --workspace <slug> [options]
 **Examples**
 
 ```sh
-# auto-pick from the backlog
+# auto-pick from the active cycle / Todo
 pick-linear-ticket --team RAN --workspace emberengineering
 
 # auto-pick and start the ticket
@@ -103,14 +104,14 @@ Steps 2 and 3 mean a fresh-laptop run can complete the whole OAuth dance without
 | Code | Meaning                                                                                            |
 | ---- | -------------------------------------------------------------------------------------------------- |
 | `0`  | Picked successfully; result on stdout.                                                             |
-| `2`  | No eligible candidate (active cycle + backlog both empty after filters).                           |
+| `2`  | No eligible candidate (active cycle and `Todo` both empty after filters).                          |
 | `3`  | Explicit pick failed gates (wrong team, terminal state, active blocker).                           |
 | `4`  | Workspace mismatch still present after the preflight OAuth retry — re-run `linear-cli auth oauth`. |
 | `5`  | `linear-cli` missing from `$PATH`, `linear-cli` error, or unknown error.                           |
 
 ## Filtering rules
 
-Only issues whose `state.name` is `Backlog` or `Todo` and whose assignee is the current user (per `linear-cli whoami`) or `null` are considered. Tickets in `In Progress`, `Done`, `Canceled`, `Triage`, `Some Day`, or any other state are skipped.
+Only issues that are **in the team's active cycle** OR whose `state.name` is `Todo` are considered, AND whose assignee is the current user (per `linear-cli whoami`) or `null`. Tickets in plain `Backlog`, `In Progress`, `Done`, `Canceled`, `Triage`, `Some Day`, or any other state are skipped — except `Backlog`-state tickets that have been added to the active cycle, which the cycle membership picks up.
 
 ## Limits
 
