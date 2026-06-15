@@ -230,6 +230,29 @@ export async function activeCycleIdentifiers(
 }
 
 /**
+ * Linear `state.type` values that count as active work. The candidate pool,
+ * the blocker-active check, and the relations graph all operate on these
+ * three; `completed` (Done), `canceled`, and `triage` are intentionally
+ * excluded. Every team-issue query filters on these so a team's completed
+ * history can't crowd still-open tickets out of a capped (`first: N`) fetch
+ * window — the cause of older `Todo` tickets silently dropping out of the
+ * candidate set once Done issues fill the page.
+ */
+const ACTIVE_STATE_TYPES = ['unstarted', 'backlog', 'started'] as const
+
+/** GraphQL `IssueFilter` fragment restricting a query to {@link ACTIVE_STATE_TYPES}. */
+const ACTIVE_STATE_FILTER = `filter: { state: { type: { in: ${JSON.stringify([...ACTIVE_STATE_TYPES])} } } }`
+
+/**
+ * Page size for the flat (scalar-only) team-issue queries. Unlike the
+ * relations query — capped at {@link ACTIVE_SET_PAGE_SIZE} to stay under the
+ * API complexity ceiling — these select only scalar fields, so a larger
+ * window is cheap. Combined with {@link ACTIVE_STATE_FILTER} the result stays
+ * bounded to open work regardless of how large the completed history grows.
+ */
+const ACTIVE_ISSUE_PAGE_SIZE = 250
+
+/**
  * Cap on the number of active issues we fetch relations for in one shot. Set
  * by Linear's 10000-complexity ceiling — a `relations.nodes.relatedIssue`
  * triple-nested selection at higher `first:` values pushes the query over.
@@ -251,7 +274,7 @@ export async function activeSetRelations(
   const query = `
     query {
       team(id: "${config.teamId}") {
-        issues(first: ${ACTIVE_SET_PAGE_SIZE}, filter: { state: { type: { in: ["unstarted", "backlog", "started"] } } }) {
+        issues(first: ${ACTIVE_SET_PAGE_SIZE}, ${ACTIVE_STATE_FILTER}) {
           nodes {
             identifier
             relations { nodes { type relatedIssue { identifier } } }
@@ -320,21 +343,47 @@ function parseIssueCore(
   }
 }
 
-/** Lists every issue in the team (capped at 250). */
+/**
+ * Lists the team's active (non-Done/Canceled) issues. The active-state filter
+ * is load-bearing: the previous `issues list --limit 250` had no state filter,
+ * so a team with hundreds of completed tickets returned a window saturated by
+ * Done/Canceled issues and the actually-eligible `Todo` tickets fell outside
+ * it — never reaching the candidate pool. Done/Canceled issues never qualify
+ * as candidates or active blockers anyway, so dropping them at the source is
+ * both a correctness fix and cheaper.
+ */
 export async function listAllIssues(config: LinearConfig): Promise<IssueCore[]> {
-  const stdout = await runLinear([
-    'issues',
-    'list',
-    '-t',
-    config.teamName,
-    '-o',
-    'json',
-    '--limit',
-    '250',
-  ])
-  const data = parseJson(stdout, 'issues list') as Parameters<typeof parseIssueCore>[0][]
+  const query = `
+    query {
+      team(id: "${config.teamId}") {
+        issues(first: ${ACTIVE_ISSUE_PAGE_SIZE}, ${ACTIVE_STATE_FILTER}) {
+          nodes {
+            identifier
+            title
+            priority
+            state { name }
+            assignee { name }
+            url
+          }
+        }
+      }
+    }
+  `
+  const stdout = await runLinear(['api', 'query', query, '-o', 'json'])
+  const data = parseJson(stdout, 'listAllIssues') as {
+    data?: {
+      team?: { issues?: { nodes?: Parameters<typeof parseIssueCore>[0][] } }
+    }
+  }
+  const nodes = data.data?.team?.issues?.nodes ?? []
+  if (nodes.length >= ACTIVE_ISSUE_PAGE_SIZE) {
+    process.stderr.write(
+      `pick-linear-ticket: team has ${nodes.length}+ active issues (page-size cap); ` +
+        `the candidate set may be incomplete.\n`,
+    )
+  }
   const result: IssueCore[] = []
-  for (const raw of data) {
+  for (const raw of nodes) {
     const issue = parseIssueCore(raw, config.workspace)
     if (issue) result.push(issue)
   }
@@ -346,9 +395,13 @@ export async function listAllIssues(config: LinearConfig): Promise<IssueCore[]> 
  *
  * Linear's `IssueFilter` has no `identifier` field and the `id` field is a
  * UUID (not the `RAN-N` string), so we can't filter the query by the caller's
- * id list directly. Instead we fetch every issue's `identifier` + `createdAt`
- * for the team in one paginated query and project it down to just the ids
- * the caller asked about.
+ * id list directly. Instead we fetch the team's active issues' `identifier` +
+ * `createdAt` and project it down to just the ids the caller asked about. The
+ * {@link ACTIVE_STATE_FILTER} matters for the same reason it does in
+ * {@link listAllIssues}: callers only ever ask about eligible (active)
+ * candidates, and without the filter a Done-saturated window would miss older
+ * ones, handing them `MISSING_CREATED_AT` and corrupting the oldest-wins
+ * tiebreak.
  */
 export async function createdAtFor(
   config: LinearConfig,
@@ -358,7 +411,7 @@ export async function createdAtFor(
   const query = `
     query {
       team(id: "${config.teamId}") {
-        issues(first: 250) {
+        issues(first: ${ACTIVE_ISSUE_PAGE_SIZE}, ${ACTIVE_STATE_FILTER}) {
           nodes { identifier createdAt }
         }
       }
