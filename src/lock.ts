@@ -1,4 +1,5 @@
 import { mkdir, rm, readdir, stat } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
@@ -31,7 +32,9 @@ export async function acquireLock(ticketId: string, lockDir: string): Promise<bo
   const lockPath = join(lockDir, ticketId)
   try {
     await mkdir(lockPath)
-    lockDebug(`acquired ${ticketId} at ${lockPath}`)
+    lockDebug(
+      `acquired ${ticketId} at ${lockPath} (exists right after mkdir=${existsSync(lockPath)})`,
+    )
     return true
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code

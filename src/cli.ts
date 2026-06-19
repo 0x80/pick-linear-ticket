@@ -278,6 +278,19 @@ async function runAutoSelect(
     ? formatJson(chosen.identifier, chosen.title, chosen.url, branchName, reason, started)
     : formatHuman(chosen.identifier, branchName, chosen.url, reason, started)
   process.stdout.write(out)
+
+  if (process.env.PICK_LINEAR_DEBUG) {
+    const { readdirSync } = await import('node:fs')
+    let contents: string
+    try {
+      contents = readdirSync(lockDir).join(', ')
+    } catch (error) {
+      contents = `<readdir failed: ${(error as Error).message}>`
+    }
+    process.stderr.write(
+      `[lock pid=${process.pid}] end-of-run: ${lockDir} contains [${contents}]\n`,
+    )
+  }
 }
 
 async function runExplicitPick(
