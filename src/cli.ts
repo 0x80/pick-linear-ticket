@@ -19,6 +19,7 @@ import {
 } from './linear-cli.ts'
 import { claimFirstAvailable, cleanupStaleLocks, releaseLock } from './lock.ts'
 import { PRIORITY_LABELS, buildReason, rankCandidates } from './rank.ts'
+import { TimeoutError, withTimeout } from './timeout.ts'
 import { buildBranchName } from './slug.ts'
 import type { Candidate, Identifier } from './types.ts'
 import { MISSING_CREATED_AT, isIdentifier } from './types.ts'
@@ -48,6 +49,7 @@ const cli = meow(
     3  Explicit pick failed gates (wrong team, terminal state, active blocker).
     4  Workspace mismatch after OAuth retry — re-run \`linear-cli auth oauth\`.
     5  linear-cli missing, Linear CLI error, or unknown error.
+    6  Timed out — a subprocess or filesystem op wedged (watchdog).
 `,
   {
     importMeta: import.meta,
@@ -369,9 +371,23 @@ async function main(): Promise<void> {
   }
 }
 
+/**
+ * Hard upper bound on a single run. A pick should take a couple of seconds;
+ * anything longer means a wedged subprocess or a stalled filesystem operation.
+ * The watchdog turns that into a fast, loud failure (exit 6) instead of a
+ * process that hangs forever at 100% CPU — exactly what happened when a
+ * detached, orphaned picker was left parked on an unresolved async request.
+ * Overridable via `PICK_LINEAR_TIMEOUT_MS` for slow links or tests.
+ */
+const WATCHDOG_MS = Number(process.env.PICK_LINEAR_TIMEOUT_MS) || 60_000
+
 try {
-  await main()
+  await withTimeout(main(), WATCHDOG_MS, 'pick-linear-ticket')
 } catch (error) {
+  if (error instanceof TimeoutError) {
+    log.error(error.message)
+    process.exit(6)
+  }
   if (error instanceof LinearCliMissingError) {
     log.error('linear-cli is not installed on this machine.')
     log.info(`Install instructions: ${LINEAR_CLI_INSTALL_URL}`)
@@ -385,3 +401,14 @@ try {
   log.error((error as Error).message)
   process.exit(5)
 }
+
+/**
+ * The pick succeeded and its output is written. `main()` resolving does not
+ * guarantee the event loop is empty — a dependency that leaves a handle (or, as
+ * we saw in the wild, an fs request that never fires its callback) would keep
+ * Node alive indefinitely. Force the exit, but on an `unref`'d grace timer so a
+ * run that drains on its own is never delayed and a piped stdout write is never
+ * truncated by an immediate `process.exit`.
+ */
+const forceExit = setTimeout(() => process.exit(0), 1000)
+forceExit.unref()

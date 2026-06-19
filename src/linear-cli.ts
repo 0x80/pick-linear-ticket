@@ -42,9 +42,19 @@ export class LinearCliMissingError extends Error {
 /** Install instructions URL for `linear-cli`, shown when the binary is missing. */
 export const LINEAR_CLI_INSTALL_URL = 'https://github.com/Finesssee/linear-cli'
 
+/**
+ * Per-subprocess deadline. A single non-interactive `linear-cli` call is one
+ * GraphQL round-trip; if it hasn't answered in this long it has wedged, so
+ * `execa` kills the child and rejects rather than letting it block the picker.
+ * Kept below the CLI's overall watchdog so this more specific error surfaces
+ * first. The interactive OAuth flow is deliberately exempt — it legitimately
+ * waits on the user and the browser handshake.
+ */
+const SUBPROCESS_TIMEOUT_MS = 30_000
+
 async function runLinear(args: string[]): Promise<string> {
   try {
-    const { stdout } = await execa('linear-cli', args)
+    const { stdout } = await execa('linear-cli', args, { timeout: SUBPROCESS_TIMEOUT_MS })
     return stdout
   } catch (error) {
     const stderr = error instanceof ExecaError ? error.stderr : ''
@@ -60,7 +70,7 @@ async function runLinear(args: string[]): Promise<string> {
  */
 async function isLinearCliInstalled(): Promise<boolean> {
   try {
-    await execa('linear-cli', ['--version'])
+    await execa('linear-cli', ['--version'], { timeout: SUBPROCESS_TIMEOUT_MS })
     return true
   } catch (error) {
     if (
@@ -82,7 +92,9 @@ async function isLinearCliInstalled(): Promise<boolean> {
  */
 async function isLinearCliAuthenticated(): Promise<boolean> {
   try {
-    const { stdout } = await execa('linear-cli', ['auth', 'status', '-o', 'json'])
+    const { stdout } = await execa('linear-cli', ['auth', 'status', '-o', 'json'], {
+      timeout: SUBPROCESS_TIMEOUT_MS,
+    })
     const data = JSON.parse(stdout) as { configured?: boolean }
     return data.configured === true
   } catch {
