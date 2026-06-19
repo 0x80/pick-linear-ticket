@@ -223,21 +223,20 @@ async function runAutoSelect(
   const chosen = pickResult.issue
 
   /** Try to acquire lock. If another process is picking this ticket, bail. */
-  log.debug(`[lock] Attempting to lock ${chosen.identifier}`)
+  log.info(`[lock] Picked ${chosen.identifier}, attempting to acquire lock at ${lockDir}...`)
   let lockAcquired = false
   try {
     lockAcquired = await acquireLock(chosen.identifier, lockDir)
   } catch (error) {
-    log.error(`Lock acquisition failed: ${(error as Error).message}`)
+    log.error(`[lock] Acquisition failed: ${(error as Error).message}`)
     process.exit(5)
   }
 
   if (!lockAcquired) {
     log.error(`${chosen.identifier} is being picked by another process. Try again in a moment.`)
-    log.debug(`[lock] Failed to acquire lock for ${chosen.identifier}`)
     process.exit(2)
   }
-  log.debug(`[lock] Successfully locked ${chosen.identifier}`)
+  log.info(`[lock] Successfully locked ${chosen.identifier}`)
   currentLockId = chosen.identifier
 
   const branchName = buildBranchName(chosen.identifier, chosen.title)
