@@ -224,6 +224,12 @@ async function runAutoSelect(
     writeVerboseTable(ranked)
   }
 
+  if (process.env.PICK_LINEAR_DEBUG) {
+    process.stderr.write(
+      `[lock pid=${process.pid}] dir=${lockDir} ranked=[${ranked.map((c) => c.identifier).join(', ')}]\n`,
+    )
+  }
+
   /**
    * Claim the highest-ranked ticket whose lock is free. When sibling processes
    * run at the same time, each grabs the next-best free ticket, so concurrent

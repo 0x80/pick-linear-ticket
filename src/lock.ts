@@ -2,6 +2,17 @@ import { mkdir, rm, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
 /**
+ * Writes a lock-tracing line to stderr when `PICK_LINEAR_DEBUG` is set, tagged
+ * with the PID so concurrent processes can be told apart. A no-op otherwise, so
+ * normal runs stay quiet and stdout stays clean for `--json` consumers.
+ */
+function lockDebug(message: string): void {
+  if (process.env.PICK_LINEAR_DEBUG) {
+    process.stderr.write(`[lock pid=${process.pid}] ${message}\n`)
+  }
+}
+
+/**
  * Attempts to claim `ticketId` by creating a directory named after it inside
  * `lockDir`. `mkdir` is atomic on every POSIX filesystem and Windows: exactly
  * one caller can create a given path, so two processes racing for the same
@@ -17,15 +28,19 @@ import { join } from 'node:path'
  */
 export async function acquireLock(ticketId: string, lockDir: string): Promise<boolean> {
   await mkdir(lockDir, { recursive: true })
+  const lockPath = join(lockDir, ticketId)
   try {
-    await mkdir(join(lockDir, ticketId))
+    await mkdir(lockPath)
+    lockDebug(`acquired ${ticketId} at ${lockPath}`)
     return true
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
     /** EEXIST means another process already holds the lock — not a failure. */
     if (code === 'EEXIST') {
+      lockDebug(`denied ${ticketId} (already held) at ${lockPath}`)
       return false
     }
+    lockDebug(`error claiming ${ticketId}: ${code ?? String(error)}`)
     throw error
   }
 }
@@ -90,6 +105,7 @@ export async function cleanupStaleLocks(
     return
   }
 
+  lockDebug(`cleanup scanning ${lockDir}: [${entries.join(', ')}]`)
   const now = Date.now()
   for (const entry of entries) {
     try {
@@ -98,6 +114,7 @@ export async function cleanupStaleLocks(
       const ageSeconds = (now - stats.mtimeMs) / 1000
       if (ageSeconds > stalenessThresholdSeconds) {
         await rm(entryPath, { recursive: true })
+        lockDebug(`cleanup removed stale ${entry} (age ${ageSeconds.toFixed(1)}s)`)
       }
     } catch {
       /** A lock removed by another process mid-sweep is fine; skip it. */
