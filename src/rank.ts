@@ -68,11 +68,31 @@ export function compareCandidates(a: Candidate, b: Candidate): number {
 }
 
 /**
+ * Returns the eligible candidates in descending preference order. Candidates
+ * blocked by any identifier in `activeIdentifiers` are dropped before sorting.
+ *
+ * Shared by {@link pickCandidate} (which takes the head) and the CLI's
+ * lock-walk, which iterates the whole list claiming the first ticket whose
+ * lock is free — so concurrent invocations fan out to distinct tickets instead
+ * of colliding on the single best one.
+ */
+export function rankCandidates(
+  pool: CandidatePool,
+  activeIdentifiers: ReadonlySet<Identifier>,
+): Candidate[] {
+  const survivors = [...pool.values()].filter(
+    (c) => !c.blockedBy.some((b) => activeIdentifiers.has(b)),
+  )
+  survivors.sort(compareCandidates)
+  return survivors
+}
+
+/**
  * Builds a short human-readable reason that explains why `chosen` was preferred
  * over `runnerUp`. Returns the label for the first dimension where the two
  * candidates strictly differ.
  */
-function buildReason(
+export function buildReason(
   chosen: Candidate,
   runnerUp: Candidate,
   unblocksMap: ReadonlyMap<Identifier, Identifier[]>,
@@ -126,9 +146,7 @@ export function pickCandidate(
   activeIdentifiers: ReadonlySet<Identifier>,
   unblocksMap: ReadonlyMap<Identifier, Identifier[]>,
 ): PickResult {
-  const survivors = [...pool.values()].filter(
-    (c) => !c.blockedBy.some((b) => activeIdentifiers.has(b)),
-  )
+  const survivors = rankCandidates(pool, activeIdentifiers)
 
   if (survivors.length === 0) {
     return {
@@ -136,8 +154,6 @@ export function pickCandidate(
       why: 'active cycle empty; no Todo candidates after blocking/assignment filters',
     }
   }
-
-  survivors.sort(compareCandidates)
 
   /** survivors is non-empty at this point (checked above). */
   const chosen = survivors[0] as Candidate

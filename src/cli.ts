@@ -17,8 +17,8 @@ import {
   startIssue,
   whoami,
 } from './linear-cli.ts'
-import { acquireLock, cleanupStaleLocks, releaseLock } from './lock.ts'
-import { PRIORITY_LABELS, compareCandidates, pickCandidate } from './rank.ts'
+import { claimFirstAvailable, cleanupStaleLocks, releaseLock } from './lock.ts'
+import { PRIORITY_LABELS, buildReason, rankCandidates } from './rank.ts'
 import { buildBranchName } from './slug.ts'
 import type { Candidate, Identifier } from './types.ts'
 import { MISSING_CREATED_AT, isIdentifier } from './types.ts'
@@ -80,24 +80,24 @@ const teamKey: string = cli.flags.team
 const workspace: string = cli.flags.workspace
 
 const log = consola.withTag('pick-linear-ticket')
-const lockDir = join(homedir(), '.pick-linear-ticket-locks')
-let currentLockId: Identifier | null = null
 
 /**
- * Best-effort cleanup on exit. Since locks are cleaned up after 30 seconds
- * anyway, if this fails it's not critical — the next run will clean it up.
+ * Directory holding one sub-directory per claimed ticket. Defaults to the home
+ * directory (not the repo) so a single set of claims is shared across every
+ * worktree/clone the picker runs from. `PICK_LINEAR_LOCK_DIR` overrides it —
+ * handy for scoping claims per-project or pointing at a writable path in
+ * sandboxed environments.
  */
-async function cleanup(): Promise<void> {
-  if (currentLockId !== null) {
-    await releaseLock(currentLockId, lockDir)
-  }
-}
+const lockDir = process.env.PICK_LINEAR_LOCK_DIR ?? join(homedir(), '.pick-linear-ticket-locks')
 
-process.on('beforeExit', () => {
-  cleanup().catch(() => {
-    // Ignore cleanup errors
-  })
-})
+/**
+ * How long a claim survives before {@link cleanupStaleLocks} reclaims it. Long
+ * enough to bridge a burst of concurrent invocations fanning out to distinct
+ * tickets; short enough that a crashed picker frees its ticket quickly. A
+ * successful `--start` moves the ticket out of eligibility well before this, so
+ * the timeout only ever matters for crash recovery.
+ */
+const STALE_LOCK_SECONDS = 30
 
 /** Single-line human-readable result for stdout. */
 function formatHuman(
@@ -214,30 +214,44 @@ async function runAutoSelect(
     })
   }
 
-  const pickResult = pickCandidate(candidatePool, activeIdentifiers, unblocks)
-  if (pickResult.kind === 'no-candidates') {
-    log.error(pickResult.why)
+  const ranked = rankCandidates(candidatePool, activeIdentifiers)
+  if (ranked.length === 0) {
+    log.error('active cycle empty; no Todo candidates after blocking/assignment filters')
     process.exit(2)
   }
 
-  const chosen = pickResult.issue
-
-  /** Try to acquire lock. If another process is picking this ticket, bail. */
-  log.info(`[lock] Picked ${chosen.identifier}, attempting to acquire lock at ${lockDir}...`)
-  let lockAcquired = false
-  try {
-    lockAcquired = await acquireLock(chosen.identifier, lockDir)
-  } catch (error) {
-    log.error(`[lock] Acquisition failed: ${(error as Error).message}`)
-    process.exit(5)
+  if (args.verbose) {
+    writeVerboseTable(ranked)
   }
 
-  if (!lockAcquired) {
-    log.error(`${chosen.identifier} is being picked by another process. Try again in a moment.`)
+  /**
+   * Claim the highest-ranked ticket whose lock is free. When sibling processes
+   * run at the same time, each grabs the next-best free ticket, so concurrent
+   * invocations fan out to distinct tickets rather than colliding on the best
+   * one. The claim persists after we exit; it's reclaimed by the staleness
+   * sweep (or by `--start` moving the ticket out of eligibility).
+   */
+  const claim = await claimFirstAvailable(ranked, lockDir)
+  if (claim === null) {
+    log.error('Every eligible ticket is already claimed by a concurrent pick. Try again shortly.')
     process.exit(2)
   }
-  log.info(`[lock] Successfully locked ${chosen.identifier}`)
-  currentLockId = chosen.identifier
+  const { chosen, lockedAhead } = claim
+
+  /**
+   * Explain the pick. When nothing higher-ranked was claimed, reuse the normal
+   * runner-up comparison. Otherwise the honest reason is that the better
+   * tickets were taken by concurrent picks.
+   */
+  let reason: string
+  if (lockedAhead === 0) {
+    const runnerUp = ranked[1]
+    reason =
+      runnerUp === undefined ? 'only eligible candidate' : buildReason(chosen, runnerUp, unblocks)
+  } else {
+    const plural = lockedAhead === 1 ? 'ticket' : 'tickets'
+    reason = `next available (${lockedAhead} higher-ranked ${plural} claimed by concurrent picks)`
+  }
 
   const branchName = buildBranchName(chosen.identifier, chosen.title)
 
@@ -247,29 +261,16 @@ async function runAutoSelect(
       await startIssue(chosen.identifier)
       started = true
     } catch (error) {
+      /** Starting failed — free the claim so another picker can take it. */
+      await releaseLock(chosen.identifier, lockDir)
       log.error((error as Error).message)
       process.exit(5)
     }
   }
 
-  if (args.verbose) {
-    const survivors = [...candidatePool.values()].filter(
-      (c) => !c.blockedBy.some((b) => activeIdentifiers.has(b)),
-    )
-    survivors.sort(compareCandidates)
-    writeVerboseTable(survivors)
-  }
-
   const out = args.json
-    ? formatJson(
-        chosen.identifier,
-        chosen.title,
-        chosen.url,
-        branchName,
-        pickResult.reason,
-        started,
-      )
-    : formatHuman(chosen.identifier, branchName, chosen.url, pickResult.reason, started)
+    ? formatJson(chosen.identifier, chosen.title, chosen.url, branchName, reason, started)
+    : formatHuman(chosen.identifier, branchName, chosen.url, reason, started)
   process.stdout.write(out)
 }
 
@@ -331,9 +332,8 @@ async function runExplicitPick(
 }
 
 async function main(): Promise<void> {
-  /** Clean up locks older than 30 seconds. */
-  log.debug(`[lock] Cleaning up stale locks in ${lockDir}`)
-  await cleanupStaleLocks(lockDir, 30)
+  /** Reclaim any locks left behind by a crashed picker before claiming our own. */
+  await cleanupStaleLocks(lockDir, STALE_LOCK_SECONDS)
 
   const config = await preflight({ teamKey, workspace })
 
