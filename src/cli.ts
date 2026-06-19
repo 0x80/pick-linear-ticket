@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { consola } from 'consola'
 import meow from 'meow'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import {
   LINEAR_CLI_INSTALL_URL,
   type LinearConfig,
@@ -15,6 +17,7 @@ import {
   startIssue,
   whoami,
 } from './linear-cli.ts'
+import { acquireLock, cleanupStaleLocks, releaseLock } from './lock.ts'
 import { PRIORITY_LABELS, compareCandidates, pickCandidate } from './rank.ts'
 import { buildBranchName } from './slug.ts'
 import type { Candidate, Identifier } from './types.ts'
@@ -77,6 +80,24 @@ const teamKey: string = cli.flags.team
 const workspace: string = cli.flags.workspace
 
 const log = consola.withTag('pick-linear-ticket')
+const lockDir = join(homedir(), '.pick-linear-ticket-locks')
+let currentLockId: Identifier | null = null
+
+/**
+ * Best-effort cleanup on exit. Since locks are cleaned up after 30 seconds
+ * anyway, if this fails it's not critical — the next run will clean it up.
+ */
+async function cleanup(): Promise<void> {
+  if (currentLockId !== null) {
+    await releaseLock(currentLockId, lockDir)
+  }
+}
+
+process.on('beforeExit', () => {
+  cleanup().catch(() => {
+    // Ignore cleanup errors
+  })
+})
 
 /** Single-line human-readable result for stdout. */
 function formatHuman(
@@ -200,6 +221,15 @@ async function runAutoSelect(
   }
 
   const chosen = pickResult.issue
+
+  /** Try to acquire lock. If another process is picking this ticket, bail. */
+  const lockAcquired = await acquireLock(chosen.identifier, lockDir)
+  if (!lockAcquired) {
+    log.error(`${chosen.identifier} is being picked by another process. Try again in a moment.`)
+    process.exit(2)
+  }
+  currentLockId = chosen.identifier
+
   const branchName = buildBranchName(chosen.identifier, chosen.title)
 
   let started = false
@@ -292,6 +322,9 @@ async function runExplicitPick(
 }
 
 async function main(): Promise<void> {
+  /** Clean up locks older than 30 seconds. */
+  await cleanupStaleLocks(lockDir, 30)
+
   const config = await preflight({ teamKey, workspace })
 
   const ticketId = cli.input[0]
