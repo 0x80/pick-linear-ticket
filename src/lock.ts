@@ -8,8 +8,13 @@ export async function acquireLock(ticketId: string, lockDir: string): Promise<bo
     const lockPath = join(lockDir, ticketId)
     await mkdir(lockPath)
     return true
-  } catch {
-    return false
+  } catch (error) {
+    /** Only return false if the directory already exists (EEXIST). Rethrow other errors. */
+    const err = error as NodeJS.ErrnoException
+    if (err.code === 'EEXIST') {
+      return false
+    }
+    throw error
   }
 }
 
@@ -18,8 +23,12 @@ export async function releaseLock(ticketId: string, lockDir: string): Promise<vo
   try {
     const lockPath = join(lockDir, ticketId)
     await rm(lockPath, { recursive: true })
-  } catch {
-    // Ignore errors if lock doesn't exist
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException
+    /** Ignore ENOENT (file doesn't exist) - that's fine. Rethrow other errors. */
+    if (err.code !== 'ENOENT') {
+      throw error
+    }
   }
 }
 
