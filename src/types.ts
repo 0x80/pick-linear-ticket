@@ -39,14 +39,14 @@ export type IssueCore = {
   /** `null` when the issue is unassigned — matches Linear's JSON representation. */
   assigneeName: string | null
   url: string
+  /** ISO-8601 creation timestamp, or {@link MISSING_CREATED_AT} when unknown. */
+  createdAt: string
 }
 
 /** An issue that has passed the initial filter and is eligible for ranking. */
 export type Candidate = IssueCore & {
   /** Whether this issue is part of the currently active cycle. */
   inCycle: boolean
-  /** ISO-8601 creation timestamp. */
-  createdAt: string
   /** Number of still-active issues this issue blocks. */
   unblocks: number
   /** Identifiers of still-active issues that block this one. */
