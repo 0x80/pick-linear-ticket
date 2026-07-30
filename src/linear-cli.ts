@@ -277,12 +277,22 @@ const RELATIONS_PAGE_SIZE = 50
 /**
  * Hard bound on how many pages a single connection walk will fetch. At the
  * smallest page size in use ({@link RELATIONS_PAGE_SIZE}) this covers 1000
- * active issues, far beyond any real team, so hitting it means the cursor
- * stopped advancing rather than that the backlog is genuinely that large. It
- * exists to keep a pathological response from burning the CLI's watchdog
- * budget in a loop.
+ * active issues, well beyond any real team. Exported so the tests assert
+ * against the configured bound rather than a copy of the number.
  */
-const MAX_ISSUE_PAGES = 20
+export const MAX_ISSUE_PAGES = 20
+
+/**
+ * Thrown when a connection walk cannot be completed. Every exit that would
+ * otherwise hand back a partial node list raises this instead — see
+ * {@link collectIssuePages} for why partial is not an acceptable result.
+ */
+export class PaginationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'PaginationError'
+  }
+}
 
 /** One page of a Linear connection, normalized for {@link collectIssuePages}. */
 export type IssuePage<T> = {
@@ -305,8 +315,17 @@ export type IssuePage<T> = {
  * genuinely does forbid a larger window, but it says nothing about how many
  * windows we may ask for.
  *
- * Split from the query construction so the loop's termination and its
- * defensive guards are unit-testable without spawning `linear-cli`.
+ * **Every failure to exhaust the connection throws {@link PaginationError}
+ * rather than returning what it has.** A partial node list is precisely the
+ * defect this function exists to remove: the ranking cannot tell a complete
+ * blocker graph from a truncated one, so a silent partial result would let the
+ * picker return a blocked ticket while looking like it succeeded. A pick that
+ * fails loudly is recoverable; a wrong pick that looks right is not. That makes
+ * the completeness contract real rather than best-effort, which is what lets
+ * the caller treat a returned list as the whole active set.
+ *
+ * Split from the query construction so the loop's termination and every guard
+ * are unit-testable without spawning `linear-cli`.
  */
 export async function collectIssuePages<T>(
   fetchPage: (cursor: string | undefined) => Promise<IssuePage<T>>,
@@ -314,6 +333,8 @@ export async function collectIssuePages<T>(
 ): Promise<T[]> {
   const all: T[] = []
   let cursor: string | undefined
+  /** Cursors already requested, so a connection that stops advancing is caught. */
+  const seenCursors = new Set<string>()
 
   for (let page = 0; page < MAX_ISSUE_PAGES; page++) {
     const { nodes, hasNextPage, endCursor } = await fetchPage(cursor)
@@ -321,25 +342,31 @@ export async function collectIssuePages<T>(
 
     if (!hasNextPage) return all
 
-    /**
-     * `hasNextPage` without a cursor leaves nowhere to resume from. Returning
-     * what we have beats looping on the same first page forever.
-     */
+    /** `hasNextPage` without a cursor leaves nowhere to resume from. */
     if (endCursor === undefined) {
-      process.stderr.write(
-        `pick-linear-ticket: ${context} reported more pages but returned no cursor; ` +
-          `continuing with ${all.length} issues.\n`,
+      throw new PaginationError(
+        `${context}: the API reported more pages but returned no cursor after ${all.length} issues`,
       )
-      return all
     }
+
+    /**
+     * A cursor that repeats means the connection is serving the same page
+     * again; continuing would re-fetch it until the page bound and then report
+     * duplicated, incomplete data.
+     */
+    if (seenCursors.has(endCursor)) {
+      throw new PaginationError(
+        `${context}: the API returned a repeated cursor after ${all.length} issues, so pagination is not advancing`,
+      )
+    }
+    seenCursors.add(endCursor)
     cursor = endCursor
   }
 
-  process.stderr.write(
-    `pick-linear-ticket: ${context} stopped at the ${MAX_ISSUE_PAGES}-page guard ` +
-      `(${all.length} issues); results may be incomplete.\n`,
+  throw new PaginationError(
+    `${context}: exceeded the ${MAX_ISSUE_PAGES}-page bound without exhausting the connection ` +
+      `(${all.length} issues); raise MAX_ISSUE_PAGES if the team is genuinely this large`,
   )
-  return all
 }
 
 /**
@@ -358,7 +385,7 @@ async function fetchActiveIssues<T>(args: {
     const after = cursor === undefined ? '' : `, after: ${JSON.stringify(cursor)}`
     const query = `
       query {
-        team(id: "${args.config.teamId}") {
+        team(id: ${JSON.stringify(args.config.teamId)}) {
           issues(first: ${args.pageSize}${after}, ${ACTIVE_STATE_FILTER}) {
             pageInfo { hasNextPage endCursor }
             nodes { ${args.selection} }
