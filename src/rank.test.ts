@@ -1,8 +1,7 @@
 /**
  * Unit tests for pickCandidate. Each case targets a distinct ranking rule or
- * edge condition: empty pool, sole candidate, blocker filtering, the promoted
- * tier (in-cycle OR `Todo`), and the three tiebreak dimensions inside the
- * tier (unblocks, priority, createdAt).
+ * edge condition: empty pool, sole candidate, blocker filtering, and the three
+ * ranking dimensions (unblocks, priority, createdAt).
  */
 
 import { describe, expect, it } from 'vitest'
@@ -31,10 +30,8 @@ type CandidateOverrides = {
 
 /**
  * Builds a minimal Candidate with neutral defaults for fields not under test.
- * `stateName` defaults to `'Backlog'` because that is the non-promoted baseline
- * — using `'Todo'` (which `isPromoted` recognizes) would silently push every
- * default candidate into the promoted tier and mask bugs in tests that aren't
- * explicitly about the tier dimension.
+ * `stateName` and `inCycle` no longer affect ranking (see the note above the
+ * unblocks cases below), so their defaults are inert.
  */
 function makeCandidate(overrides: CandidateOverrides): Candidate {
   return {
@@ -162,60 +159,16 @@ describe('pickCandidate', () => {
     }
   })
 
-  it('in-cycle candidate beats a higher-priority out-of-cycle backlog candidate', () => {
-    /** X is in-cycle with no priority; Y is out-of-cycle Backlog with Urgent priority. X wins. */
-    const inCycleCandidate = makeCandidate({
-      identifier: 'RAN-100',
-      inCycle: true,
-      stateName: 'Backlog',
-      priority: 0,
-      createdAt: '2024-06-01T00:00:00.000Z', // later
-    })
-    const urgentBacklog = makeCandidate({
-      identifier: 'RAN-200',
-      inCycle: false,
-      stateName: 'Backlog',
-      priority: 1,
-      createdAt: '2024-01-01T00:00:00.000Z', // earlier
-    })
-    const pool = makePool([inCycleCandidate, urgentBacklog])
-
-    const result = pickCandidate(pool, new Set(), new Map())
-
-    expect(result.kind).toBe('chosen')
-    if (result.kind === 'chosen') {
-      expect(result.issue.identifier).toBe('RAN-100')
-      expect(result.reason).toContain('in active cycle')
-    }
-  })
-
-  it('Todo candidate beats a higher-priority Backlog candidate', () => {
-    /** Todo (promoted) beats Backlog (not promoted) regardless of priority. */
-    const todoCandidate = makeCandidate({
-      identifier: 'RAN-300',
-      inCycle: false,
-      stateName: 'Todo',
-      priority: 0,
-    })
-    const urgentBacklog = makeCandidate({
-      identifier: 'RAN-400',
-      inCycle: false,
-      stateName: 'Backlog',
-      priority: 1,
-    })
-    const pool = makePool([todoCandidate, urgentBacklog])
-
-    const result = pickCandidate(pool, new Set(), new Map())
-
-    expect(result.kind).toBe('chosen')
-    if (result.kind === 'chosen') {
-      expect(result.issue.identifier).toBe('RAN-300')
-      expect(result.reason).toContain('marked as Todo')
-    }
-  })
-
-  it('inside the promoted tier, unblocks breaks the tie', () => {
-    /** Both promoted (one Todo, one in-cycle Backlog) — the one that unblocks more wins. */
+  /**
+   * There is no "promoted" (in-cycle / `Todo` above plain `Backlog`) tier to
+   * test: eligibility upstream admits only `inCycle || stateName === 'Todo'`,
+   * which is the same predicate such a tier would apply, so it could never
+   * discriminate between two candidates that reached the comparator. The cases
+   * that used to live here built out-of-cycle `Backlog` candidates the CLI
+   * cannot produce. What does discriminate regardless of cycle/state is the
+   * unblocks dimension:
+   */
+  it('ranks by unblocks regardless of cycle membership or state name', () => {
     const todoNoUnblocks = makeCandidate({
       identifier: 'RAN-500',
       stateName: 'Todo',
@@ -236,6 +189,35 @@ describe('pickCandidate', () => {
     if (result.kind === 'chosen') {
       expect(result.issue.identifier).toBe('RAN-600')
       expect(result.reason).toContain('blocks RAN-700')
+    }
+  })
+
+  it('lets priority win over cycle membership, which no longer ranks', () => {
+    /**
+     * The inverse of the removed tier: an in-cycle candidate with no priority
+     * does NOT beat an Urgent one. Guards against the tier being reintroduced
+     * without also loosening eligibility.
+     */
+    const inCycleNoPriority = makeCandidate({
+      identifier: 'RAN-100',
+      inCycle: true,
+      stateName: 'Todo',
+      priority: 0,
+    })
+    const urgentTodo = makeCandidate({
+      identifier: 'RAN-200',
+      inCycle: false,
+      stateName: 'Todo',
+      priority: 1,
+    })
+    const pool = makePool([inCycleNoPriority, urgentTodo])
+
+    const result = pickCandidate(pool, new Set(), new Map())
+
+    expect(result.kind).toBe('chosen')
+    if (result.kind === 'chosen') {
+      expect(result.issue.identifier).toBe('RAN-200')
+      expect(result.reason).toContain('Urgent')
     }
   })
 

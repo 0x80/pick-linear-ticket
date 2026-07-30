@@ -16,32 +16,36 @@ The ranking is fixed:
 2. **Priority** — Urgent → High → Medium → Low → No priority.
 3. **Created date** — older tickets win ties.
 
+Cycle membership and `Todo` are an eligibility gate only, not a ranking dimension — every candidate that reaches the ranking already satisfies one of them, so neither can break a tie between two of them.
+
 Issues with at least one active blocker (Backlog/Todo/In Progress) are dropped before ranking.
 
 ## Install
 
 Requires Node ≥ 24. The [`linear-cli`](https://github.com/Finesssee/linear-cli) binary must be on `$PATH` — the CLI surfaces install instructions and auto-triggers `linear-cli auth oauth` on first run if anything's missing (see [Preflight](#preflight)).
 
-Run without installing:
-
-```sh
-pnpm dlx pick-linear-ticket --team RAN --workspace emberengineering
-```
-
-Install from GitHub as a dev dependency (npm publish pending):
+Not published to npm yet, so install from GitHub. As a dev dependency:
 
 ```sh
 pnpm add -D github:0x80/pick-linear-ticket
 ```
 
-Or install globally from a local clone while iterating:
+Or globally, to get `pick-linear-ticket` on `$PATH`:
+
+```sh
+pnpm add -g github:0x80/pick-linear-ticket
+```
+
+To run your own build while iterating, install globally from a local clone:
 
 ```sh
 git clone https://github.com/0x80/pick-linear-ticket
 cd pick-linear-ticket
 pnpm install
-pnpm add -g "$(pwd)"
+pnpm add -g .
 ```
+
+`pnpm add -g .` symlinks the global entry at your clone, so after the first install a plain `pnpm build` is enough to pick up further changes — no reinstall. The flip side is that the global binary then tracks whatever is checked out there, so building on a feature branch changes what `pick-linear-ticket` runs. (`pnpm link --global` is deprecated; `pnpm add -g .` replaces it. To remove: `pnpm uninstall -g pick-linear-ticket`.)
 
 The `prepare` script runs `tsdown` and writes the bundled entry to `dist/cli.mjs`, which is what `bin` points at.
 
@@ -101,17 +105,41 @@ Steps 2 and 3 mean a fresh-laptop run can complete the whole OAuth dance without
 
 ## Exit codes
 
-| Code | Meaning                                                                                            |
-| ---- | -------------------------------------------------------------------------------------------------- |
-| `0`  | Picked successfully; result on stdout.                                                             |
-| `2`  | No eligible candidate (active cycle and `Todo` both empty after filters).                          |
-| `3`  | Explicit pick failed gates (wrong team, terminal state, active blocker).                           |
-| `4`  | Workspace mismatch still present after the preflight OAuth retry — re-run `linear-cli auth oauth`. |
-| `5`  | `linear-cli` missing from `$PATH`, `linear-cli` error, or unknown error.                           |
+| Code | Meaning                                                                                                                                                                   |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`  | Picked successfully; result on stdout.                                                                                                                                    |
+| `1`  | Usage error — `--team` or `--workspace` missing. Usage text is printed.                                                                                                   |
+| `2`  | No eligible candidate: either nothing survived the filters, or every eligible ticket is already claimed by a concurrent pick (see [Concurrent picks](#concurrent-picks)). |
+| `3`  | Explicit pick failed gates (wrong team, terminal state, active blocker).                                                                                                  |
+| `4`  | Workspace mismatch still present after the preflight OAuth retry — re-run `linear-cli auth oauth`.                                                                        |
+| `5`  | `linear-cli` missing from `$PATH`, `linear-cli` error, incomplete pagination, or unknown error.                                                                           |
+| `6`  | Timed out — a subprocess or filesystem operation wedged and the watchdog fired.                                                                                           |
 
 ## Filtering rules
 
 Only issues that are **in the team's active cycle** OR whose `state.name` is `Todo` are considered, AND whose assignee is the current user (per `linear-cli whoami`) or `null`. Tickets in plain `Backlog`, `In Progress`, `Done`, `Canceled`, `Triage`, `Some Day`, or any other state are skipped — except `Backlog`-state tickets that have been added to the active cycle, which the cycle membership picks up.
+
+## Concurrent picks
+
+Two pickers started at once would otherwise both return the best ticket. To prevent that, a pick **claims** its ticket with a lock directory before returning: it walks the ranked list top-down and takes the highest-ranked ticket whose lock is free, so concurrent invocations fan out to distinct tickets instead of colliding.
+
+When something better was already claimed, `reason` says so rather than inventing a ranking explanation:
+
+```
+next available (2 higher-ranked tickets claimed by concurrent picks)
+```
+
+If every eligible ticket is claimed, the CLI exits `2`. Claims are reclaimed after 30 seconds, so a crashed picker frees its ticket quickly; a successful `--start` moves the ticket out of eligibility well before that, which is what normally releases it.
+
+Locks live in `~/.pick-linear-ticket-locks` by default — deliberately in `$HOME` rather than the repo, so a single set of claims is shared across every clone and worktree a picker runs from.
+
+## Environment variables
+
+| Variable                 | Default                       | Effect                                                                                                       |
+| ------------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `PICK_LINEAR_LOCK_DIR`   | `~/.pick-linear-ticket-locks` | Where claims are stored. Point it elsewhere to scope claims per project, or at a writable path in a sandbox. |
+| `PICK_LINEAR_TIMEOUT_MS` | `60000`                       | Watchdog for the whole run. Exceeding it exits `6`. Raise it on slow links.                                  |
+| `PICK_LINEAR_DEBUG`      | unset                         | Any non-empty value traces lock claims and the ranked list to stderr.                                        |
 
 ## Limits
 

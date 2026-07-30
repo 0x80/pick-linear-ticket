@@ -22,31 +22,22 @@ function prioritySortKey(priority: number): number {
 }
 
 /**
- * A candidate is "promoted" when it has been signalled as wanted soon —
- * either by being added to the active cycle or by the user moving it from
- * `Backlog` to `Todo`. Promoted candidates sort above plain backlog work.
- */
-export function isPromoted(c: Candidate): boolean {
-  return c.inCycle || c.stateName === 'Todo'
-}
-
-/**
  * Comparator for sorting candidates in descending preference order:
- * 1. Promoted (in-cycle OR `Todo`) ahead of plain `Backlog`.
- * 2. `unblocks` descending (more unblocks is better).
- * 3. Priority ascending, with `0` (No priority) treated as `Infinity`.
- * 4. `createdAt` ascending (older is better).
+ * 1. `unblocks` descending (more unblocks is better).
+ * 2. Priority ascending, with `0` (No priority) treated as `Infinity`.
+ * 3. `createdAt` ascending (older is better).
+ *
+ * There is deliberately no "promoted" tier above these. One used to sit here,
+ * ranking in-cycle / `Todo` candidates above plain `Backlog` — but eligibility
+ * upstream already admits only `inCycle || stateName === 'Todo'` (the exact
+ * predicate the tier tested), so every candidate reaching this comparator
+ * satisfied it and the tier could never discriminate. Restoring it only makes
+ * sense together with a looser eligibility filter.
  *
  * Exported so the CLI's `--verbose` ranking table can sort with the same
  * key the picker uses, without duplicating the comparator.
  */
 export function compareCandidates(a: Candidate, b: Candidate): number {
-  const aPromoted = isPromoted(a)
-  const bPromoted = isPromoted(b)
-  if (aPromoted !== bPromoted) {
-    return aPromoted ? -1 : 1
-  }
-
   if (a.unblocks !== b.unblocks) {
     return b.unblocks - a.unblocks
   }
@@ -97,11 +88,6 @@ export function buildReason(
   runnerUp: Candidate,
   unblocksMap: ReadonlyMap<Identifier, Identifier[]>,
 ): string {
-  if (isPromoted(chosen) && !isPromoted(runnerUp)) {
-    if (chosen.inCycle) return 'in active cycle'
-    return 'marked as Todo'
-  }
-
   if (chosen.unblocks > runnerUp.unblocks) {
     const downstream = unblocksMap.get(chosen.identifier) ?? []
     /**
@@ -125,21 +111,24 @@ export function buildReason(
   }
 
   /**
-   * All four dimensions tied. Reachable when multiple candidates share the
-   * same promotion state, unblocks count, priority, and createdAt (e.g. both
-   * fall back to `MISSING_CREATED_AT`). The chosen one wins by insertion
-   * order from the stable sort.
+   * All three dimensions tied. Reachable when multiple candidates share the
+   * same unblocks count, priority, and createdAt (e.g. both fall back to
+   * `MISSING_CREATED_AT`). The chosen one wins by insertion order from the
+   * stable sort.
    */
   return 'tied on all ranking dimensions'
 }
 
 /**
- * Selects the best candidate from `pool` using a four-dimension ranking:
- * promoted (in-cycle OR `Todo`) > unblocks > priority > createdAt.
+ * Selects the best candidate from `pool` using the three-dimension ranking:
+ * unblocks > priority > createdAt.
  *
  * Candidates blocked by any identifier in `activeIdentifiers` are dropped
  * before ranking. `unblocksMap` supplies the downstream identifier lists needed
  * to compose a meaningful reason string when the unblocks count breaks a tie.
+ *
+ * Not used by the CLI, which calls {@link rankCandidates} directly so it can
+ * walk the ranked list claiming the first ticket whose lock is free.
  */
 export function pickCandidate(
   pool: CandidatePool,
