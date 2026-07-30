@@ -115,7 +115,8 @@ Only issues that are **in the team's active cycle** OR whose `state.name` is `To
 
 ## Limits
 
-- Hardcoded to the first 50 active issues for the relations query (Linear's GraphQL complexity ceiling of 10000 forbids more without splitting the query). If your team has more than ~50 active issues in `Backlog`/`Todo`/`In Progress` at once, you'll need to widen the query or paginate — file an issue.
+- The relations query is capped at 50 issues per request by Linear's GraphQL complexity ceiling of 10000 (`first: 100` costs ~11200 and is rejected). It pages through the cursor until the active set is exhausted, so the page size only affects how many round-trips a pick costs, not what the pick can see.
+- **A pick never ranks a partial blocker graph.** If a connection walk can't be exhausted — the API claims another page but returns no cursor, the cursor stops advancing, or the walk exceeds its 20-page bound (1000 issues at the relations page size) — the run fails with a `PaginationError` instead of returning what it gathered. The ranking can't tell a truncated graph from a complete one, so a silent partial result would let the picker hand back a blocked ticket while looking like it succeeded. Raise `MAX_ISSUE_PAGES` if a team genuinely outgrows the bound.
 - One CLI, one team per invocation. If you work across teams, call it once per team.
 
 ## License

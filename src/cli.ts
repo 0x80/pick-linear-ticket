@@ -10,7 +10,6 @@ import {
   WorkspaceMismatchError,
   activeCycleIdentifiers,
   activeSetRelations,
-  createdAtFor,
   getIssue,
   listAllIssues,
   preflight,
@@ -22,7 +21,7 @@ import { PRIORITY_LABELS, buildReason, rankCandidates } from './rank.ts'
 import { TimeoutError, withTimeout } from './timeout.ts'
 import { buildBranchName } from './slug.ts'
 import type { Candidate, Identifier } from './types.ts'
-import { MISSING_CREATED_AT, isIdentifier } from './types.ts'
+import { isIdentifier } from './types.ts'
 
 const cli = meow(
   `
@@ -197,20 +196,11 @@ async function runAutoSelect(
       (i.assigneeName === null || i.assigneeName === currentUserName),
   )
 
-  const candidateIds = eligibleIssues.map((i) => i.identifier)
-  const createdAtMap = candidateIds.length > 0 ? await createdAtFor(config, candidateIds) : {}
-
   const candidatePool = new Map<Identifier, Candidate>()
   for (const issue of eligibleIssues) {
     candidatePool.set(issue.identifier, {
       ...issue,
       inCycle: cycleIds.has(issue.identifier),
-      /**
-       * Missing `createdAt` sorts LAST in the oldest-wins tiebreak, not
-       * first. Using the Unix epoch as a fallback would cause a candidate
-       * without a known timestamp to silently beat real, older tickets.
-       */
-      createdAt: createdAtMap[issue.identifier] ?? MISSING_CREATED_AT,
       unblocks: (unblocks.get(issue.identifier) ?? []).length,
       blockedBy: blockedBy.get(issue.identifier) ?? [],
     })

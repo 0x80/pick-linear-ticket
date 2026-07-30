@@ -256,67 +256,187 @@ const ACTIVE_STATE_TYPES = ['unstarted', 'backlog', 'started'] as const
 const ACTIVE_STATE_FILTER = `filter: { state: { type: { in: ${JSON.stringify([...ACTIVE_STATE_TYPES])} } } }`
 
 /**
- * Page size for the flat (scalar-only) team-issue queries. Unlike the
- * relations query — capped at {@link ACTIVE_SET_PAGE_SIZE} to stay under the
- * API complexity ceiling — these select only scalar fields, so a larger
- * window is cheap. Combined with {@link ACTIVE_STATE_FILTER} the result stays
- * bounded to open work regardless of how large the completed history grows.
+ * Page size for the flat (scalar-only) team-issue query. These select only
+ * scalar fields, so a large window costs little complexity. Pagination means
+ * this is a round-trip/complexity tuning knob, not a correctness bound.
  */
 const ACTIVE_ISSUE_PAGE_SIZE = 250
 
 /**
- * Cap on the number of active issues we fetch relations for in one shot. Set
- * by Linear's 10000-complexity ceiling — a `relations.nodes.relatedIssue`
- * triple-nested selection at higher `first:` values pushes the query over.
- * When a team's active backlog grows beyond this, the relations graph this
- * function returns is partial; we emit a stderr warning so the caller knows
- * the ranking might miss some `blocks` edges.
+ * Page size for the relations query. Bounded by Linear's 10000-complexity
+ * ceiling: the `relations.nodes.relatedIssue` triple-nested selection costs
+ * roughly 112 complexity per issue, so `first: 100` is rejected outright
+ * ("Complexity: 11231. Maximum allowed complexity: 10000") while 75 still
+ * passes. Complexity is computed statically from the `first:` multipliers, not
+ * from how many relations the issues actually have, so the ceiling is stable.
+ * 50 keeps comfortable headroom; correctness no longer depends on the value
+ * because {@link collectIssuePages} walks every page.
  */
-const ACTIVE_SET_PAGE_SIZE = 50
+const RELATIONS_PAGE_SIZE = 50
 
 /**
- * Fetches outgoing `blocks` relations across every active issue in the team.
- * Returns one entry per active issue; `blocks` is the list of identifiers the
- * source issue blocks. Built in one GraphQL request to stay under the API's
- * complexity ceiling.
+ * Hard bound on how many pages a single connection walk will fetch. At the
+ * smallest page size in use ({@link RELATIONS_PAGE_SIZE}) this covers 1000
+ * active issues, well beyond any real team. Exported so the tests assert
+ * against the configured bound rather than a copy of the number.
  */
-export async function activeSetRelations(
-  config: LinearConfig,
-): Promise<{ identifier: Identifier; blocks: Identifier[] }[]> {
-  const query = `
-    query {
-      team(id: "${config.teamId}") {
-        issues(first: ${ACTIVE_SET_PAGE_SIZE}, ${ACTIVE_STATE_FILTER}) {
-          nodes {
-            identifier
-            relations { nodes { type relatedIssue { identifier } } }
+export const MAX_ISSUE_PAGES = 20
+
+/**
+ * Thrown when a connection walk cannot be completed. Every exit that would
+ * otherwise hand back a partial node list raises this instead — see
+ * {@link collectIssuePages} for why partial is not an acceptable result.
+ */
+export class PaginationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'PaginationError'
+  }
+}
+
+/** One page of a Linear connection, normalized for {@link collectIssuePages}. */
+export type IssuePage<T> = {
+  nodes: T[]
+  hasNextPage: boolean
+  /** `undefined` when the API returned no cursor to advance with. */
+  endCursor: string | undefined
+}
+
+/**
+ * Walks a cursor-paginated Linear connection to exhaustion and returns every
+ * node. `fetchPage` receives the cursor to resume from (`undefined` for the
+ * first page).
+ *
+ * This is what makes the relations graph complete. Previously the relations
+ * query took a single `first: 50` window and warned that the graph "may be
+ * partial" beyond that — which meant that on any team with more than 50 active
+ * issues the ranking silently missed `blocks` edges, so a blocked ticket could
+ * be picked and an unblocking ticket under-credited. The complexity ceiling
+ * genuinely does forbid a larger window, but it says nothing about how many
+ * windows we may ask for.
+ *
+ * **Every failure to exhaust the connection throws {@link PaginationError}
+ * rather than returning what it has.** A partial node list is precisely the
+ * defect this function exists to remove: the ranking cannot tell a complete
+ * blocker graph from a truncated one, so a silent partial result would let the
+ * picker return a blocked ticket while looking like it succeeded. A pick that
+ * fails loudly is recoverable; a wrong pick that looks right is not. That makes
+ * the completeness contract real rather than best-effort, which is what lets
+ * the caller treat a returned list as the whole active set.
+ *
+ * Split from the query construction so the loop's termination and every guard
+ * are unit-testable without spawning `linear-cli`.
+ */
+export async function collectIssuePages<T>(
+  fetchPage: (cursor: string | undefined) => Promise<IssuePage<T>>,
+  context: string,
+): Promise<T[]> {
+  const all: T[] = []
+  let cursor: string | undefined
+  /** Cursors already requested, so a connection that stops advancing is caught. */
+  const seenCursors = new Set<string>()
+
+  for (let page = 0; page < MAX_ISSUE_PAGES; page++) {
+    const { nodes, hasNextPage, endCursor } = await fetchPage(cursor)
+    all.push(...nodes)
+
+    if (!hasNextPage) return all
+
+    /** `hasNextPage` without a cursor leaves nowhere to resume from. */
+    if (endCursor === undefined) {
+      throw new PaginationError(
+        `${context}: the API reported more pages but returned no cursor after ${all.length} issues`,
+      )
+    }
+
+    /**
+     * A cursor that repeats means the connection is serving the same page
+     * again; continuing would re-fetch it until the page bound and then report
+     * duplicated, incomplete data.
+     */
+    if (seenCursors.has(endCursor)) {
+      throw new PaginationError(
+        `${context}: the API returned a repeated cursor after ${all.length} issues, so pagination is not advancing`,
+      )
+    }
+    seenCursors.add(endCursor)
+    cursor = endCursor
+  }
+
+  throw new PaginationError(
+    `${context}: exceeded the ${MAX_ISSUE_PAGES}-page bound without exhausting the connection ` +
+      `(${all.length} issues); raise MAX_ISSUE_PAGES if the team is genuinely this large`,
+  )
+}
+
+/**
+ * Fetches every active issue in the team, paging until the connection is
+ * exhausted, and returns the raw nodes for the given GraphQL `selection`.
+ * Callers supply only the fields they need so each query's complexity stays
+ * proportional to its own selection.
+ */
+async function fetchActiveIssues<T>(args: {
+  config: LinearConfig
+  selection: string
+  pageSize: number
+  context: string
+}): Promise<T[]> {
+  const fetchPage = async (cursor: string | undefined): Promise<IssuePage<T>> => {
+    const after = cursor === undefined ? '' : `, after: ${JSON.stringify(cursor)}`
+    const query = `
+      query {
+        team(id: ${JSON.stringify(args.config.teamId)}) {
+          issues(first: ${args.pageSize}${after}, ${ACTIVE_STATE_FILTER}) {
+            pageInfo { hasNextPage endCursor }
+            nodes { ${args.selection} }
+          }
+        }
+      }
+    `
+    const stdout = await runLinear(['api', 'query', query, '-o', 'json'])
+    const data = parseJson(stdout, args.context) as {
+      data?: {
+        team?: {
+          issues?: {
+            pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }
+            nodes?: T[]
           }
         }
       }
     }
-  `
-  const stdout = await runLinear(['api', 'query', query, '-o', 'json'])
-  const data = parseJson(stdout, 'activeSetRelations') as {
-    data?: {
-      team?: {
-        issues?: {
-          nodes?: {
-            identifier: string
-            relations?: {
-              nodes?: { type: string; relatedIssue?: { identifier?: string } }[]
-            }
-          }[]
-        }
-      }
+    const issues = data.data?.team?.issues
+    return {
+      nodes: issues?.nodes ?? [],
+      hasNextPage: issues?.pageInfo?.hasNextPage === true,
+      endCursor: issues?.pageInfo?.endCursor ?? undefined,
     }
   }
-  const nodes = data.data?.team?.issues?.nodes ?? []
-  if (nodes.length >= ACTIVE_SET_PAGE_SIZE) {
-    process.stderr.write(
-      `pick-linear-ticket: relations query returned ${nodes.length} issues (page-size cap); ` +
-        `the unblocks/blockedBy graph may be partial for teams with more than ${ACTIVE_SET_PAGE_SIZE} active issues.\n`,
-    )
-  }
+
+  const nodes = await collectIssuePages<T>(fetchPage, args.context)
+  return nodes
+}
+
+/**
+ * Fetches outgoing `blocks` relations across every active issue in the team.
+ * Returns one entry per active issue; `blocks` is the list of identifiers the
+ * source issue blocks. Paged at {@link RELATIONS_PAGE_SIZE} to stay under the
+ * API's complexity ceiling while still covering the whole active set.
+ */
+export async function activeSetRelations(
+  config: LinearConfig,
+): Promise<{ identifier: Identifier; blocks: Identifier[] }[]> {
+  const nodes = await fetchActiveIssues<{
+    identifier: string
+    relations?: {
+      nodes?: { type: string; relatedIssue?: { identifier?: string } }[]
+    }
+  }>({
+    config,
+    selection: 'identifier relations { nodes { type relatedIssue { identifier } } }',
+    pageSize: RELATIONS_PAGE_SIZE,
+    context: 'activeSetRelations',
+  })
+
   const result: { identifier: Identifier; blocks: Identifier[] }[] = []
   for (const node of nodes) {
     if (!isIdentifier(node.identifier)) continue
@@ -339,6 +459,7 @@ function parseIssueCore(
     state?: { name?: string }
     assignee?: { name?: string } | null
     url?: string
+    createdAt?: string
   },
   workspace: string,
 ): IssueCore | null {
@@ -352,96 +473,46 @@ function parseIssueCore(
     stateName: raw.state?.name ?? '',
     assigneeName: raw.assignee?.name ?? null,
     url,
+    /**
+     * Missing `createdAt` sorts LAST in the oldest-wins tiebreak, not first.
+     * Using the Unix epoch as a fallback would let an issue with no known
+     * timestamp silently beat real, older tickets.
+     */
+    createdAt: raw.createdAt ?? MISSING_CREATED_AT,
   }
 }
 
 /**
- * Lists the team's active (non-Done/Canceled) issues. The active-state filter
- * is load-bearing: the previous `issues list --limit 250` had no state filter,
- * so a team with hundreds of completed tickets returned a window saturated by
- * Done/Canceled issues and the actually-eligible `Todo` tickets fell outside
- * it — never reaching the candidate pool. Done/Canceled issues never qualify
- * as candidates or active blockers anyway, so dropping them at the source is
- * both a correctness fix and cheaper.
+ * Lists the team's active (non-Done/Canceled) issues, paging until the
+ * connection is exhausted.
+ *
+ * The active-state filter is load-bearing: the original `issues list
+ * --limit 250` had no state filter, so a team with hundreds of completed
+ * tickets returned a window saturated by Done/Canceled issues and the
+ * actually-eligible `Todo` tickets fell outside it — never reaching the
+ * candidate pool. Done/Canceled issues never qualify as candidates or active
+ * blockers anyway, so dropping them at the source is both a correctness fix
+ * and cheaper.
+ *
+ * `createdAt` is selected here rather than by a second query over the same
+ * connection: the ranking's oldest-wins tiebreak needs it for every candidate,
+ * and it is a scalar, so folding it in costs one field instead of a full extra
+ * paginated walk.
  */
 export async function listAllIssues(config: LinearConfig): Promise<IssueCore[]> {
-  const query = `
-    query {
-      team(id: "${config.teamId}") {
-        issues(first: ${ACTIVE_ISSUE_PAGE_SIZE}, ${ACTIVE_STATE_FILTER}) {
-          nodes {
-            identifier
-            title
-            priority
-            state { name }
-            assignee { name }
-            url
-          }
-        }
-      }
-    }
-  `
-  const stdout = await runLinear(['api', 'query', query, '-o', 'json'])
-  const data = parseJson(stdout, 'listAllIssues') as {
-    data?: {
-      team?: { issues?: { nodes?: Parameters<typeof parseIssueCore>[0][] } }
-    }
-  }
-  const nodes = data.data?.team?.issues?.nodes ?? []
-  if (nodes.length >= ACTIVE_ISSUE_PAGE_SIZE) {
-    process.stderr.write(
-      `pick-linear-ticket: team has ${nodes.length}+ active issues (page-size cap); ` +
-        `the candidate set may be incomplete.\n`,
-    )
-  }
+  const nodes = await fetchActiveIssues<Parameters<typeof parseIssueCore>[0]>({
+    config,
+    selection: 'identifier title priority state { name } assignee { name } url createdAt',
+    pageSize: ACTIVE_ISSUE_PAGE_SIZE,
+    context: 'listAllIssues',
+  })
+
   const result: IssueCore[] = []
   for (const raw of nodes) {
     const issue = parseIssueCore(raw, config.workspace)
     if (issue) result.push(issue)
   }
   return result
-}
-
-/**
- * Looks up `createdAt` timestamps for a set of issue identifiers.
- *
- * Linear's `IssueFilter` has no `identifier` field and the `id` field is a
- * UUID (not the `RAN-N` string), so we can't filter the query by the caller's
- * id list directly. Instead we fetch the team's active issues' `identifier` +
- * `createdAt` and project it down to just the ids the caller asked about. The
- * {@link ACTIVE_STATE_FILTER} matters for the same reason it does in
- * {@link listAllIssues}: callers only ever ask about eligible (active)
- * candidates, and without the filter a Done-saturated window would miss older
- * ones, handing them `MISSING_CREATED_AT` and corrupting the oldest-wins
- * tiebreak.
- */
-export async function createdAtFor(
-  config: LinearConfig,
-  ids: Identifier[],
-): Promise<Record<Identifier, string>> {
-  if (ids.length === 0) return {}
-  const query = `
-    query {
-      team(id: "${config.teamId}") {
-        issues(first: ${ACTIVE_ISSUE_PAGE_SIZE}, ${ACTIVE_STATE_FILTER}) {
-          nodes { identifier createdAt }
-        }
-      }
-    }
-  `
-  const stdout = await runLinear(['api', 'query', query, '-o', 'json'])
-  const data = parseJson(stdout, 'createdAtFor') as {
-    data?: {
-      team?: { issues?: { nodes?: { identifier: string; createdAt: string }[] } }
-    }
-  }
-  const wanted = new Set<Identifier>(ids)
-  const out: Record<Identifier, string> = {}
-  for (const node of data.data?.team?.issues?.nodes ?? []) {
-    if (!isIdentifier(node.identifier) || !wanted.has(node.identifier)) continue
-    out[node.identifier] = node.createdAt
-  }
-  return out
 }
 
 /**
