@@ -55,29 +55,7 @@ export type Candidate = IssueCore & {
 
 /**
  * The full set of eligible candidates, keyed by identifier.
- * Using a map (rather than an array) lets `pickCandidate` look up blockers by
- * id in O(1) without a secondary index.
+ * Using a map (rather than an array) lets the caller look up a candidate by id
+ * in O(1) without a secondary index.
  */
 export type CandidatePool = ReadonlyMap<Identifier, Candidate>
-
-/**
- * The outcome of a pick attempt.
- *
- * Narrow via `result.kind`:
- * - `'chosen'` — a candidate was selected; `issue` and `reason` are populated.
- *   The branch name + start transition are the caller's concern (see
- *   `cli.ts`); keeping them out of this type leaves `pickCandidate` purely
- *   about ranking.
- * - `'no-candidates'` — no eligible issues remain; `why` describes the gap
- *   (e.g. "active cycle empty; backlog empty after blocking/assignment filters").
- */
-export type PickResult =
-  | {
-      kind: 'chosen'
-      issue: Candidate
-      reason: string
-    }
-  | {
-      kind: 'no-candidates'
-      why: string
-    }

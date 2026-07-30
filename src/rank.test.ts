@@ -1,13 +1,17 @@
 /**
- * Unit tests for pickCandidate. Each case targets a distinct ranking rule or
- * edge condition: empty pool, sole candidate, blocker filtering, and the three
+ * Unit tests for the ranking. Each case targets a distinct ranking rule or edge
+ * condition: empty pool, sole candidate, blocker filtering, and the three
  * ranking dimensions (unblocks, priority, createdAt).
+ *
+ * They drive `rankCandidates` + `buildReason` through the `pick` helper below,
+ * which is the same two-step the CLI performs — so what is asserted here is the
+ * production path rather than a parallel one.
  */
 
 import { describe, expect, it } from 'vitest'
 
 import type { Candidate, CandidatePool, Identifier } from './types.ts'
-import { pickCandidate } from './rank.ts'
+import { buildReason, rankCandidates } from './rank.ts'
 
 /** Casts a plain string to the branded `Identifier` type for use in test fixtures. */
 function id(value: string): Identifier {
@@ -53,28 +57,43 @@ function makePool(candidates: Candidate[]): CandidatePool {
   return new Map(candidates.map((c) => [c.identifier, c]))
 }
 
-describe('pickCandidate', () => {
-  it('returns no-candidates when the pool is empty', () => {
-    const result = pickCandidate(new Map(), new Set(), new Map())
-    expect(result.kind).toBe('no-candidates')
-    if (result.kind === 'no-candidates') {
-      expect(result.why).toBe(
-        'active cycle empty; no Todo candidates after blocking/assignment filters',
-      )
-    }
+/**
+ * Ranks the pool and explains the winner against the runner-up — the exact
+ * two-step `runAutoSelect` performs, minus the lock-walk (which only changes
+ * *which* ranked entry is claimed, never the order). Returns `undefined` when
+ * nothing survives, standing in for the CLI's exit-2 path.
+ */
+function pick(
+  pool: CandidatePool,
+  activeIdentifiers: ReadonlySet<Identifier>,
+  unblocksMap: ReadonlyMap<Identifier, Identifier[]>,
+): { chosen: Candidate; reason: string } | undefined {
+  const ranked = rankCandidates(pool, activeIdentifiers)
+  const chosen = ranked[0]
+  if (chosen === undefined) return undefined
+  const runnerUp = ranked[1]
+  return {
+    chosen,
+    reason:
+      runnerUp === undefined
+        ? 'only eligible candidate'
+        : buildReason(chosen, runnerUp, unblocksMap),
+  }
+}
+
+describe('ranking', () => {
+  it('yields nothing when the pool is empty', () => {
+    expect(pick(new Map(), new Set(), new Map())).toBeUndefined()
   })
 
-  it('returns chosen with reason "only eligible candidate" for a single candidate', () => {
+  it('reports "only eligible candidate" for a single candidate', () => {
     const candidate = makeCandidate({ identifier: 'RAN-1' })
     const pool = makePool([candidate])
 
-    const result = pickCandidate(pool, new Set(), new Map())
+    const result = pick(pool, new Set(), new Map())
 
-    expect(result.kind).toBe('chosen')
-    if (result.kind === 'chosen') {
-      expect(result.issue).toBe(candidate)
-      expect(result.reason).toBe('only eligible candidate')
-    }
+    expect(result?.chosen).toBe(candidate)
+    expect(result?.reason).toBe('only eligible candidate')
   })
 
   it('drops a candidate blocked by an active issue', () => {
@@ -83,9 +102,7 @@ describe('pickCandidate', () => {
     const pool = makePool([blocked])
     const activeIdentifiers = new Set([id('RAN-2')])
 
-    const result = pickCandidate(pool, activeIdentifiers, new Map())
-
-    expect(result.kind).toBe('no-candidates')
+    expect(pick(pool, activeIdentifiers, new Map())).toBeUndefined()
   })
 
   it('keeps a candidate whose blocker is no longer active', () => {
@@ -94,9 +111,23 @@ describe('pickCandidate', () => {
     const pool = makePool([candidate])
     const activeIdentifiers = new Set<Identifier>() // RAN-3 is not active
 
-    const result = pickCandidate(pool, activeIdentifiers, new Map())
+    expect(pick(pool, activeIdentifiers, new Map())?.chosen).toBe(candidate)
+  })
 
-    expect(result.kind).toBe('chosen')
+  it('returns the full ranked list, not just the winner, for the CLI lock-walk', () => {
+    /**
+     * The CLI claims the first ticket whose lock is free, so it needs every
+     * survivor in order — not just the head.
+     */
+    const first = makeCandidate({ identifier: 'RAN-1', unblocks: 2 })
+    const second = makeCandidate({ identifier: 'RAN-2', unblocks: 1 })
+    const third = makeCandidate({ identifier: 'RAN-3', unblocks: 0 })
+    const blocked = makeCandidate({ identifier: 'RAN-4', unblocks: 9, blockedBy: [id('RAN-5')] })
+    const pool = makePool([third, blocked, first, second])
+
+    const ranked = rankCandidates(pool, new Set([id('RAN-5')]))
+
+    expect(ranked.map((c) => c.identifier)).toEqual(['RAN-1', 'RAN-2', 'RAN-3'])
   })
 
   it('picks the candidate with more unblocks, and reason mentions a downstream id', () => {
@@ -105,13 +136,10 @@ describe('pickCandidate', () => {
     const pool = makePool([candidateA, candidateB])
     const unblocksMap = new Map([[id('RAN-11'), [id('RAN-99')]]])
 
-    const result = pickCandidate(pool, new Set(), unblocksMap)
+    const result = pick(pool, new Set(), unblocksMap)
 
-    expect(result.kind).toBe('chosen')
-    if (result.kind === 'chosen') {
-      expect(result.issue.identifier).toBe('RAN-11')
-      expect(result.reason).toContain('blocks RAN-99')
-    }
+    expect(result?.chosen.identifier).toBe('RAN-11')
+    expect(result?.reason).toContain('blocks RAN-99')
   })
 
   it('picks the highest-priority candidate when unblocks are equal', () => {
@@ -121,13 +149,10 @@ describe('pickCandidate', () => {
     const noPriority = makeCandidate({ identifier: 'RAN-30', priority: 0, unblocks: 0 })
     const pool = makePool([urgent, medium, noPriority])
 
-    const result = pickCandidate(pool, new Set(), new Map())
+    const result = pick(pool, new Set(), new Map())
 
-    expect(result.kind).toBe('chosen')
-    if (result.kind === 'chosen') {
-      expect(result.issue.identifier).toBe('RAN-10')
-      expect(result.reason).toContain('Urgent')
-    }
+    expect(result?.chosen.identifier).toBe('RAN-10')
+    expect(result?.reason).toContain('Urgent')
   })
 
   it('picks the oldest candidate when unblocks and priority are equal', () => {
@@ -150,13 +175,10 @@ describe('pickCandidate', () => {
      */
     const pool = makePool([newer, older])
 
-    const result = pickCandidate(pool, new Set(), new Map())
+    const result = pick(pool, new Set(), new Map())
 
-    expect(result.kind).toBe('chosen')
-    if (result.kind === 'chosen') {
-      expect(result.issue.identifier).toBe('RAN-1')
-      expect(result.reason).toContain('oldest by createdAt')
-    }
+    expect(result?.chosen.identifier).toBe('RAN-1')
+    expect(result?.reason).toContain('oldest by createdAt')
   })
 
   /**
@@ -183,13 +205,10 @@ describe('pickCandidate', () => {
     const pool = makePool([todoNoUnblocks, cycleUnblocker])
     const unblocksMap = new Map([[id('RAN-600'), [id('RAN-700')]]])
 
-    const result = pickCandidate(pool, new Set(), unblocksMap)
+    const result = pick(pool, new Set(), unblocksMap)
 
-    expect(result.kind).toBe('chosen')
-    if (result.kind === 'chosen') {
-      expect(result.issue.identifier).toBe('RAN-600')
-      expect(result.reason).toContain('blocks RAN-700')
-    }
+    expect(result?.chosen.identifier).toBe('RAN-600')
+    expect(result?.reason).toContain('blocks RAN-700')
   })
 
   it('lets priority win over cycle membership, which no longer ranks', () => {
@@ -212,13 +231,10 @@ describe('pickCandidate', () => {
     })
     const pool = makePool([inCycleNoPriority, urgentTodo])
 
-    const result = pickCandidate(pool, new Set(), new Map())
+    const result = pick(pool, new Set(), new Map())
 
-    expect(result.kind).toBe('chosen')
-    if (result.kind === 'chosen') {
-      expect(result.issue.identifier).toBe('RAN-200')
-      expect(result.reason).toContain('Urgent')
-    }
+    expect(result?.chosen.identifier).toBe('RAN-200')
+    expect(result?.reason).toContain('Urgent')
   })
 
   it('reports a tied reason when two candidates match on every dimension', () => {
@@ -238,12 +254,9 @@ describe('pickCandidate', () => {
     })
     const pool = makePool([a, b])
 
-    const result = pickCandidate(pool, new Set(), new Map())
+    const result = pick(pool, new Set(), new Map())
 
-    expect(result.kind).toBe('chosen')
-    if (result.kind === 'chosen') {
-      expect(result.reason).toContain('tied')
-      expect(result.reason).not.toContain('only eligible candidate')
-    }
+    expect(result?.reason).toContain('tied')
+    expect(result?.reason).not.toContain('only eligible candidate')
   })
 })

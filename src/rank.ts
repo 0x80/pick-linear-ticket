@@ -1,4 +1,4 @@
-import type { Candidate, CandidatePool, Identifier, PickResult } from './types.ts'
+import type { Candidate, CandidatePool, Identifier } from './types.ts'
 
 /**
  * Maps numeric Linear priority to a human-readable label. Exported so the CLI
@@ -62,10 +62,10 @@ export function compareCandidates(a: Candidate, b: Candidate): number {
  * Returns the eligible candidates in descending preference order. Candidates
  * blocked by any identifier in `activeIdentifiers` are dropped before sorting.
  *
- * Shared by {@link pickCandidate} (which takes the head) and the CLI's
- * lock-walk, which iterates the whole list claiming the first ticket whose
- * lock is free — so concurrent invocations fan out to distinct tickets instead
- * of colliding on the single best one.
+ * The CLI walks the whole returned list rather than just taking the head,
+ * claiming the first ticket whose lock is free — so concurrent invocations fan
+ * out to distinct tickets instead of colliding on the single best one. That
+ * lock-walk is why this returns the ranked list instead of one winner.
  */
 export function rankCandidates(
   pool: CandidatePool,
@@ -117,43 +117,4 @@ export function buildReason(
    * stable sort.
    */
   return 'tied on all ranking dimensions'
-}
-
-/**
- * Selects the best candidate from `pool` using the three-dimension ranking:
- * unblocks > priority > createdAt.
- *
- * Candidates blocked by any identifier in `activeIdentifiers` are dropped
- * before ranking. `unblocksMap` supplies the downstream identifier lists needed
- * to compose a meaningful reason string when the unblocks count breaks a tie.
- *
- * Not used by the CLI, which calls {@link rankCandidates} directly so it can
- * walk the ranked list claiming the first ticket whose lock is free.
- */
-export function pickCandidate(
-  pool: CandidatePool,
-  activeIdentifiers: ReadonlySet<Identifier>,
-  unblocksMap: ReadonlyMap<Identifier, Identifier[]>,
-): PickResult {
-  const survivors = rankCandidates(pool, activeIdentifiers)
-
-  if (survivors.length === 0) {
-    return {
-      kind: 'no-candidates',
-      why: 'active cycle empty; no Todo candidates after blocking/assignment filters',
-    }
-  }
-
-  /** survivors is non-empty at this point (checked above). */
-  const chosen = survivors[0] as Candidate
-  const runnerUp: Candidate | undefined = survivors[1]
-
-  const reason =
-    runnerUp === undefined ? 'only eligible candidate' : buildReason(chosen, runnerUp, unblocksMap)
-
-  return {
-    kind: 'chosen',
-    issue: chosen,
-    reason,
-  }
 }
