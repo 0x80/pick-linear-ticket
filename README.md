@@ -65,6 +65,7 @@ pick-linear-ticket [TICKET_ID] --team <key> --workspace <slug> [options]
 - `--start` — also transition the chosen ticket to "In Progress" after picking it.
 - `--json` — emit the result as a single-line JSON object on stdout instead of a human line.
 - `--verbose` — write the full ranking table to stderr before the result.
+- `--resume` — explicit picks only: accept a ticket that is already "In Progress" or whose branch already exists locally. Use it when you're deliberately resuming work you own. Auto-select ignores it (see [Local claims](#local-claims)).
 - `--help`, `-h` — show usage.
 
 **Examples**
@@ -110,7 +111,7 @@ Steps 2 and 3 mean a fresh-laptop run can complete the whole OAuth dance without
 | `0`  | Picked successfully; result on stdout.                                                                                                                                    |
 | `1`  | Usage error — `--team` or `--workspace` missing. Usage text is printed.                                                                                                   |
 | `2`  | No eligible candidate: either nothing survived the filters, or every eligible ticket is already claimed by a concurrent pick (see [Concurrent picks](#concurrent-picks)). |
-| `3`  | Explicit pick failed gates (wrong team, terminal state, active blocker).                                                                                                  |
+| `3`  | Explicit pick failed gates (wrong team, terminal state, already In Progress, existing local branch/worktree, active blocker).                                             |
 | `4`  | Workspace mismatch still present after the preflight OAuth retry — re-run `linear-cli auth oauth`.                                                                        |
 | `5`  | `linear-cli` missing from `$PATH`, `linear-cli` error, incomplete pagination, or unknown error.                                                                           |
 | `6`  | Timed out — a subprocess or filesystem operation wedged and the watchdog fired.                                                                                           |
@@ -118,6 +119,19 @@ Steps 2 and 3 mean a fresh-laptop run can complete the whole OAuth dance without
 ## Filtering rules
 
 Only issues that are **in the team's active cycle** OR whose `state.name` is `Todo` are considered, AND whose assignee is the current user (per `linear-cli whoami`) or `null`. Tickets in plain `Backlog`, `In Progress`, `Done`, `Canceled`, `Triage`, `Some Day`, or any other state are skipped — except `Backlog`-state tickets that have been added to the active cycle, which the cycle membership picks up.
+
+Candidates whose branch already exists locally are then dropped, whatever Linear says about them. See [Local claims](#local-claims).
+
+## Local claims
+
+Every ticket maps to a deterministic branch name, so the local repository is itself a record of what has already been started. Before returning a pick, the CLI reads `git worktree list` and `git branch --list` in the working directory and treats a matching branch as a claim: auto-select skips those candidates, and an explicit pick exits `3` unless `--resume` is passed.
+
+This exists because the Linear-side state checks are only as good as the read behind them. In the incident that motivated it, Linear was degraded — the run's `--start` came back `HTTP 503` — and the issue list served a stale state for a ticket that had been "In Progress" for two hours. It passed the eligibility filter, its 30-second lock had expired long before, and the explicit-pick retry only gated on `Done`/`Canceled`, so a second agent was launched into a worktree another agent was actively writing.
+
+A branch on disk can't go stale that way, which is why it gets the final say. Two deliberate limits:
+
+- **Local only.** Remote branches aren't consulted: `origin/*` reflects the last fetch, so it both misses fresh work and lingers after a merged branch is deleted.
+- **Never fatal.** If the working directory isn't a git repository, git is missing, or either read fails, the probe reports no claims rather than throwing — the CLI is global and is legitimately run from non-repository directories.
 
 ## Concurrent picks
 
@@ -129,7 +143,9 @@ When something better was already claimed, `reason` says so rather than inventin
 next available (2 higher-ranked tickets claimed by concurrent picks)
 ```
 
-If every eligible ticket is claimed, the CLI exits `2`. Claims are reclaimed after 30 seconds, so a crashed picker frees its ticket quickly; a successful `--start` moves the ticket out of eligibility well before that, which is what normally releases it.
+If every eligible ticket is claimed, the CLI exits `2`. Claims are reclaimed after 30 seconds, so a crashed picker frees its ticket quickly.
+
+That 30-second window covers a burst of simultaneous invocations and nothing more. It is **not** what stops a ticket already being worked from being picked again — a lock that old expired long ago, and if Linear serves a stale state the ticket looks eligible again. [Local claims](#local-claims) is the guard that holds over hours.
 
 Locks live in `~/.pick-linear-ticket-locks` by default — deliberately in `$HOME` rather than the repo, so a single set of claims is shared across every clone and worktree a picker runs from.
 

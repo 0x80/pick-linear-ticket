@@ -16,6 +16,7 @@ import {
   startIssue,
   whoami,
 } from './linear-cli.ts'
+import { describeLocalClaim, readLocalClaims } from './local-claim.ts'
 import { claimFirstAvailable, cleanupStaleLocks, releaseLock } from './lock.ts'
 import { PRIORITY_LABELS, buildReason, rankCandidates } from './rank.ts'
 import { TimeoutError, withTimeout } from './timeout.ts'
@@ -36,6 +37,9 @@ const cli = meow(
     --start      Transition the chosen ticket to In Progress.
     --json       Emit machine-readable JSON to stdout (single line).
     --verbose    Write the ranking table to stderr before the result.
+    --resume     Explicit picks only: allow a ticket that is already In Progress
+                 or whose branch already exists locally. Use when deliberately
+                 resuming work you own.
     --help, -h   Show this usage text and exit.
 
   Examples
@@ -45,7 +49,8 @@ const cli = meow(
   Exit codes
     0  Picked successfully.
     2  No eligible candidate.
-    3  Explicit pick failed gates (wrong team, terminal state, active blocker).
+    3  Explicit pick failed gates (wrong team, terminal state, already In
+       Progress, existing local branch/worktree, active blocker).
     4  Workspace mismatch after OAuth retry — re-run \`linear-cli auth oauth\`.
     5  linear-cli missing, Linear CLI error, or unknown error.
     6  Timed out — a subprocess or filesystem op wedged (watchdog).
@@ -58,6 +63,7 @@ const cli = meow(
       start: { type: 'boolean', default: false },
       json: { type: 'boolean', default: false },
       verbose: { type: 'boolean', default: false },
+      resume: { type: 'boolean', default: false },
       help: { type: 'boolean', shortFlag: 'h', default: false },
     },
   },
@@ -94,9 +100,16 @@ const lockDir = process.env.PICK_LINEAR_LOCK_DIR ?? join(homedir(), '.pick-linea
 /**
  * How long a claim survives before {@link cleanupStaleLocks} reclaims it. Long
  * enough to bridge a burst of concurrent invocations fanning out to distinct
- * tickets; short enough that a crashed picker frees its ticket quickly. A
- * successful `--start` moves the ticket out of eligibility well before this, so
- * the timeout only ever matters for crash recovery.
+ * tickets; short enough that a crashed picker frees its ticket quickly.
+ *
+ * This window is deliberately short because it is NOT the defense against
+ * re-picking a ticket someone is already working. It used to be described that
+ * way — "a successful `--start` moves the ticket out of eligibility well before
+ * this" — which is only true while Linear reads are fresh. When Linear is
+ * degraded and serving stale states (observed alongside an HTTP 503 on
+ * `--start`), an already-started ticket keeps looking eligible and a 30-second
+ * lock expired hours ago. The durable guard is {@link readLocalClaims}, which
+ * reads the local repository instead and cannot go stale.
  */
 const STALE_LOCK_SECONDS = 30
 
@@ -206,14 +219,37 @@ async function runAutoSelect(
     })
   }
 
-  const ranked = rankCandidates(candidatePool, activeIdentifiers)
-  if (ranked.length === 0) {
+  const rankedAll = rankCandidates(candidatePool, activeIdentifiers)
+  if (rankedAll.length === 0) {
     log.error('active cycle empty; no Todo candidates after blocking/assignment filters')
+    process.exit(2)
+  }
+
+  /**
+   * Drop candidates whose branch already exists locally. Linear's own state is
+   * supposed to make this unreachable — an In Progress ticket passes neither
+   * eligibility branch — but that assumes fresh reads, and a degraded Linear
+   * has served stale states in practice. A branch or worktree on disk is the
+   * one claim signal that stays true when the API does not, so it gets the
+   * final say over the ranked list.
+   */
+  const localClaims = await readLocalClaims()
+  const ranked = rankedAll.filter((c) => !localClaims.has(buildBranchName(c.identifier, c.title)))
+  const claimedLocally = rankedAll.length - ranked.length
+
+  if (ranked.length === 0) {
+    log.error(
+      `every eligible ticket already has a local branch or worktree (${claimedLocally} skipped)`,
+    )
     process.exit(2)
   }
 
   if (args.verbose) {
     writeVerboseTable(ranked)
+    if (claimedLocally > 0) {
+      const plural = claimedLocally === 1 ? 'candidate' : 'candidates'
+      process.stderr.write(`skipped ${claimedLocally} ${plural} with an existing local branch\n`)
+    }
   }
 
   if (process.env.PICK_LINEAR_DEBUG) {
@@ -288,7 +324,7 @@ async function runAutoSelect(
 async function runExplicitPick(
   rawId: string,
   config: LinearConfig,
-  args: { start: boolean; json: boolean },
+  args: { start: boolean; json: boolean; resume: boolean },
 ): Promise<void> {
   const id = rawId.toUpperCase()
   if (!isIdentifier(id)) {
@@ -314,6 +350,19 @@ async function runExplicitPick(
     process.exit(3)
   }
 
+  /**
+   * An In Progress ticket already has an owner. Accepting it silently is what
+   * let a transient Linear outage escalate into two agents implementing the
+   * same ticket in the same worktree: the auto-select picked an already-started
+   * ticket from a stale read, its `--start` failed with a 503, and the retry as
+   * an explicit pick sailed through this gate because only Done and Canceled
+   * were checked. `--resume` is the deliberate override.
+   */
+  if (issue.stateName === 'In Progress' && !args.resume) {
+    log.error(`${id} is already In Progress — pass --resume to pick it up deliberately`)
+    process.exit(3)
+  }
+
   const activeBlockerStates = new Set(['Backlog', 'Todo', 'In Progress'])
   const activeBlockers = issue.blockers.filter((b) => activeBlockerStates.has(b.stateName))
   if (activeBlockers.length > 0) {
@@ -323,6 +372,20 @@ async function runExplicitPick(
   }
 
   const branchName = buildBranchName(id, issue.title)
+
+  /**
+   * The local guard, applied after the Linear-side gates so its message is the
+   * most specific one the user sees. It holds even when Linear is unreachable
+   * or stale, which the state checks above cannot.
+   */
+  if (!args.resume) {
+    const localClaims = await readLocalClaims()
+    const claim = localClaims.get(branchName)
+    if (claim !== undefined) {
+      log.error(`${id}: ${describeLocalClaim(claim)} — pass --resume to pick it up anyway`)
+      process.exit(3)
+    }
+  }
 
   let started = false
   if (args.start) {
@@ -355,8 +418,13 @@ async function main(): Promise<void> {
   }
 
   if (ticketId !== undefined) {
-    await runExplicitPick(ticketId, config, common)
+    await runExplicitPick(ticketId, config, { ...common, resume: cli.flags.resume })
   } else {
+    /**
+     * `--resume` is deliberately not honored here. It means "I know this
+     * specific ticket is underway", which only makes sense for a named ticket;
+     * auto-select must never hand back work that already has an owner.
+     */
     await runAutoSelect(config, { ...common, verbose: cli.flags.verbose })
   }
 }
