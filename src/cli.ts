@@ -16,7 +16,7 @@ import {
   startIssue,
   whoami,
 } from './linear-cli.ts'
-import { describeLocalClaim, readLocalClaims } from './local-claim.ts'
+import { describeLocalClaim, findLocalClaim, readLocalClaims } from './local-claim.ts'
 import { claimFirstAvailable, cleanupStaleLocks, releaseLock } from './lock.ts'
 import { PRIORITY_LABELS, buildReason, rankCandidates } from './rank.ts'
 import { TimeoutError, withTimeout } from './timeout.ts'
@@ -108,8 +108,10 @@ const lockDir = process.env.PICK_LINEAR_LOCK_DIR ?? join(homedir(), '.pick-linea
  * this" — which is only true while Linear reads are fresh. When Linear is
  * degraded and serving stale states (observed alongside an HTTP 503 on
  * `--start`), an already-started ticket keeps looking eligible and a 30-second
- * lock expired hours ago. The durable guard is {@link readLocalClaims}, which
- * reads the local repository instead and cannot go stale.
+ * lock expired hours ago. {@link readLocalClaims} covers that span instead, by
+ * reading the local repository rather than Linear. It is a conservative signal,
+ * not an authoritative one: a branch left behind after the work merged still
+ * reads as a claim, and a failed git read reports none.
  */
 const STALE_LOCK_SECONDS = 30
 
@@ -234,7 +236,7 @@ async function runAutoSelect(
    * final say over the ranked list.
    */
   const localClaims = await readLocalClaims()
-  const ranked = rankedAll.filter((c) => !localClaims.has(buildBranchName(c.identifier, c.title)))
+  const ranked = rankedAll.filter((c) => findLocalClaim(localClaims, c.identifier) === undefined)
   const claimedLocally = rankedAll.length - ranked.length
 
   if (ranked.length === 0) {
@@ -380,7 +382,7 @@ async function runExplicitPick(
    */
   if (!args.resume) {
     const localClaims = await readLocalClaims()
-    const claim = localClaims.get(branchName)
+    const claim = findLocalClaim(localClaims, id)
     if (claim !== undefined) {
       log.error(`${id}: ${describeLocalClaim(claim)} — pass --resume to pick it up anyway`)
       process.exit(3)

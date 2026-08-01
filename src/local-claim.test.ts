@@ -11,7 +11,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { describeLocalClaim, readLocalClaims } from './local-claim.ts'
+import {
+  branchClaimsTicket,
+  describeLocalClaim,
+  findLocalClaim,
+  type LocalClaim,
+  readLocalClaims,
+} from './local-claim.ts'
 
 /**
  * Spawning real git is the point of this suite — a mocked git would only
@@ -144,6 +150,81 @@ describe('local-claim', () => {
       },
       GIT_TEST_TIMEOUT_MS,
     )
+  })
+
+  describe('branchClaimsTicket', () => {
+    it('matches the branch the picker would generate', () => {
+      expect(branchClaimsTicket('ran-1947-standardize-mobile-sheets', 'RAN-1947')).toBe(true)
+    })
+
+    it('matches a branch whose slug no longer reflects the current title', () => {
+      /**
+       * The regression test for the whole reason matching is on the identifier:
+       * a title edit in Linear changes the name the picker would generate, but
+       * the branch on disk keeps the slug it was created with. Both of these
+       * are the same ticket and both must be seen as claimed.
+       */
+      expect(branchClaimsTicket('ran-1947-the-original-title', 'RAN-1947')).toBe(true)
+      expect(branchClaimsTicket('ran-1947-a-completely-different-slug', 'RAN-1947')).toBe(true)
+    })
+
+    it('matches a bare identifier branch with no slug', () => {
+      expect(branchClaimsTicket('ran-1947', 'RAN-1947')).toBe(true)
+    })
+
+    it('matches an identifier carried inside a prefixed branch convention', () => {
+      expect(branchClaimsTicket('thijs/0521-ran-74-min-participants', 'RAN-74')).toBe(true)
+    })
+
+    it('does not let a shorter identifier claim a longer one', () => {
+      /** Without the trailing-digit rule, `RAN-19` would swallow `ran-1947-*`. */
+      expect(branchClaimsTicket('ran-1947-standardize-mobile-sheets', 'RAN-19')).toBe(false)
+      expect(branchClaimsTicket('ran-19470-something', 'RAN-1947')).toBe(false)
+    })
+
+    it('does not match a different ticket or an unrelated branch', () => {
+      expect(branchClaimsTicket('ran-1946-other-work', 'RAN-1947')).toBe(false)
+      expect(branchClaimsTicket('main', 'RAN-1947')).toBe(false)
+    })
+
+    it('does not let an identifier match mid-word', () => {
+      expect(branchClaimsTicket('xran-1947-thing', 'RAN-1947')).toBe(false)
+    })
+  })
+
+  describe('findLocalClaim', () => {
+    /** Builds the branch-keyed map shape `readLocalClaims` returns. */
+    function claimsOf(...entries: LocalClaim[]): Map<string, LocalClaim> {
+      return new Map(entries.map((entry) => [entry.branchName, entry]))
+    }
+
+    it('finds a claim whose slug drifted from the ticket title', () => {
+      const claims = claimsOf({ branchName: 'ran-1947-stale-slug' })
+      expect(findLocalClaim(claims, 'RAN-1947')?.branchName).toBe('ran-1947-stale-slug')
+    })
+
+    it('returns undefined when no branch belongs to the ticket', () => {
+      const claims = claimsOf({ branchName: 'ran-1946-other' }, { branchName: 'main' })
+      expect(findLocalClaim(claims, 'RAN-1947')).toBeUndefined()
+    })
+
+    it('prefers a worktree claim over a bare branch for the same ticket', () => {
+      const claims = claimsOf(
+        { branchName: 'ran-1947-bare' },
+        { branchName: 'ran-1947-checked-out', worktreePath: '/tmp/wt' },
+      )
+      expect(findLocalClaim(claims, 'RAN-1947')?.worktreePath).toBe('/tmp/wt')
+    })
+
+    it('falls back to a bare branch when no worktree matches', () => {
+      const claims = claimsOf(
+        { branchName: 'ran-1947-bare' },
+        { branchName: 'ran-1946-elsewhere', worktreePath: '/tmp/other' },
+      )
+      const claim = findLocalClaim(claims, 'RAN-1947')
+      expect(claim?.branchName).toBe('ran-1947-bare')
+      expect(claim?.worktreePath).toBeUndefined()
+    })
   })
 
   describe('describeLocalClaim', () => {

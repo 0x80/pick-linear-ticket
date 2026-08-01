@@ -76,8 +76,15 @@ function parseWorktrees(stdout: string): Map<string, string> {
  * branch is deleted. Local worktrees and branches are the signals that are
  * true right now on this machine.
  *
- * Returns an empty map when `cwd` is not a git repository, when git is missing,
- * or when either read fails.
+ * Failure is per-probe, and a partial result is returned on purpose: if the
+ * branch read fails but the worktree read succeeds, the worktree claims are
+ * still reported. Claims are purely additive — every entry is a branch that
+ * really exists — so a partial answer can only ever catch *fewer* claims than
+ * a complete one, never invent a false one. Discarding it would turn a
+ * half-failed read into a guard that detects nothing, which is the fail-open
+ * behavior this module was written to remove. Both probes failing (not a git
+ * repository, git missing) therefore yields an empty map, which is the honest
+ * "cannot tell" answer rather than a manufactured one.
  */
 export async function readLocalClaims(cwd: string = process.cwd()): Promise<LocalClaims> {
   const [worktreeStdout, branchStdout] = await Promise.all([
@@ -104,6 +111,52 @@ export async function readLocalClaims(cwd: string = process.cwd()): Promise<Loca
   }
 
   return claims
+}
+
+/**
+ * Escapes the regex metacharacters that can appear in a Linear identifier.
+ * Identifiers match `<KEY>-<N>`, so in practice this is the `-`, but escaping
+ * defensively keeps {@link branchClaimsTicket} correct if the shape widens.
+ */
+function escapeForRegex(value: string): string {
+  return value.replaceAll(/[.*+?^${}()|[\]\\-]/g, '\\$&')
+}
+
+/**
+ * Returns true when `branchName` belongs to `identifier`.
+ *
+ * Matching is on the **ticket identifier**, never on the branch name the
+ * picker would generate today. A branch name is `<id>-<title-slug>`, so a
+ * title edit in Linear changes the generated name while the branch on disk
+ * keeps the old slug — matching on the generated name would silently stop
+ * recognizing a branch that is plainly the ticket's, which is the entire
+ * failure this guard exists to prevent.
+ *
+ * The identifier must appear as a delimited segment: not preceded by another
+ * alphanumeric, and not followed by a digit. The trailing-digit rule is what
+ * keeps `RAN-19` from claiming `ran-1947-foo`, and the leading rule lets a
+ * prefixed convention like `thijs/0521-ran-74-slug` still match.
+ */
+export function branchClaimsTicket(branchName: string, identifier: string): boolean {
+  const pattern = new RegExp(`(^|[^a-z0-9])${escapeForRegex(identifier.toLowerCase())}([^0-9]|$)`)
+  return pattern.test(branchName.toLowerCase())
+}
+
+/**
+ * Finds the claim on `identifier`, if any. A worktree claim wins over a bare
+ * branch when both match, so the message the user gets names the checked-out
+ * path rather than an incidental leftover branch.
+ */
+export function findLocalClaim(claims: LocalClaims, identifier: string): LocalClaim | undefined {
+  let fallback: LocalClaim | undefined
+
+  for (const claim of claims.values()) {
+    if (!branchClaimsTicket(claim.branchName, identifier)) continue
+    if (claim.worktreePath !== undefined) return claim
+    fallback ??= claim
+  }
+
+  return fallback
 }
 
 /**
